@@ -6,7 +6,9 @@
 
 **Architecture:** A Swift core library parses and incrementally tails recent Codex Desktop JSONL sessions, reduces events into active-turn state plus one terminal latch, and publishes one aggregate traffic-light state. A small AppKit executable renders that state in an `NSStatusItem` and borderless floating `NSPanel`; a shell script assembles the release executable into a standard app bundle.
 
-**Tech Stack:** Swift 6 toolchain in Swift 5 language mode, Foundation, AppKit, Swift Package Manager, XCTest, POSIX shell.
+**Tech Stack:** Swift 6 toolchain in Swift 5 language mode, Foundation, AppKit, Swift Package Manager, zero-dependency executable test harness, POSIX shell.
+
+**Execution environment adjustment:** The installed Apple Command Line Tools contains neither `XCTest` nor Swift `Testing`. Core tests are therefore implemented as the zero-dependency `CodexTrafficLightCoreTests` executable in `Tests/CodexTrafficLightCoreTests/main.swift` and run with `swift run CodexTrafficLightCoreTests`; any failed assertion exits nonzero. This supersedes the XCTest filenames and `swift test` commands below without changing their required behaviors.
 
 ## Global Constraints
 

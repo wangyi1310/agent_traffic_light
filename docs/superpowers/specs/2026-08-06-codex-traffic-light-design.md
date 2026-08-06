@@ -127,7 +127,7 @@ Only task-terminal failure signals produce the red state. Individual tool failur
 
 ## Build And Packaging
 
-The repository contains a Swift Package with one executable target and one test target. `swift build` and `swift test` are the source-level build and verification commands.
+The repository contains a Swift Package with the app executable and a zero-dependency executable test harness. `swift build` and `swift run CodexTrafficLightCoreTests` are the source-level build and verification commands. The executable harness is required because the installed Apple Command Line Tools contains neither `XCTest` nor Swift `Testing`.
 
 A small packaging script builds the release executable and assembles `Codex Traffic Light.app` with `Contents/MacOS`, `Contents/Resources`, and an `Info.plist`. The app is an accessory application so it does not add a Dock icon. Signing and notarization are intentionally outside the first version.
 
