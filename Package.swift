@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "CodexTrafficLightCore", targets: ["CodexTrafficLightCore"]),
+        .executable(name: "CodexTrafficLightApp", targets: ["CodexTrafficLightApp"]),
         .executable(
             name: "CodexTrafficLightCoreTests",
             targets: ["CodexTrafficLightCoreTests"]
@@ -16,6 +17,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "CodexTrafficLightCore"),
+        .executableTarget(
+            name: "CodexTrafficLightApp",
+            dependencies: ["CodexTrafficLightCore"]
+        ),
         .executableTarget(
             name: "CodexTrafficLightCoreTests",
             dependencies: ["CodexTrafficLightCore"],

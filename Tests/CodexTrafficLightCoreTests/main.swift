@@ -294,6 +294,45 @@ private func testMonitorSortsFilesByTimestampAndRestartsAfterTruncation() {
     }
 }
 
+private func testLampFramesMatchEveryTrafficLightState() {
+    expect(
+        TrafficLightAnimation.litLamps(for: .thinking, phase: 0) == [.red],
+        "thinking phase zero should light red"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .thinking, phase: 1) == [.yellow],
+        "thinking phase one should light yellow"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .thinking, phase: 2) == [.green],
+        "thinking phase two should light green"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .executing, phase: 0).isEmpty,
+        "executing even phase should dim yellow"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .executing, phase: 1) == [.yellow],
+        "executing odd phase should light yellow"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .completed, phase: 0) == [.green],
+        "completed should keep green lit"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .error, phase: 0).isEmpty,
+        "error even phase should dim red"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .error, phase: 1) == [.red],
+        "error odd phase should light red"
+    )
+    expect(
+        TrafficLightAnimation.litLamps(for: .idle, phase: 0).isEmpty,
+        "idle should keep all lamps dim"
+    )
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
@@ -307,6 +346,7 @@ testParserIgnoresUnknownRecordsAndRejectsMalformedJSON()
 testMonitorFiltersOriginatorAndTailsNewEvents()
 testMonitorBuffersPartialLinesAndRecoversAfterMalformedLine()
 testMonitorSortsFilesByTimestampAndRestartsAfterTruncation()
+testLampFramesMatchEveryTrafficLightState()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)
