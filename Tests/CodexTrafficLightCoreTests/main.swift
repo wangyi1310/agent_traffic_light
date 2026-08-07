@@ -554,6 +554,86 @@ private func testClaudeMonitorExpiresStaleThinkingButNotExecuting() {
     }
 }
 
+private func testClaudeMonitorMapsRuntimeApprovalToExecuting() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        let transcript = project.appendingPathComponent("approval.jsonl")
+        let runtimeSession = runtime.appendingPathComponent("current.json")
+        let now = Date()
+        let promptTimestamp = ISO8601DateFormatter().string(
+            from: now.addingTimeInterval(-60)
+        )
+        let prompt = """
+        {"type":"user","timestamp":"\(promptTimestamp)","sessionId":"approval-session","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}
+        """ + "\n"
+        try prompt.write(to: transcript, atomically: true, encoding: .utf8)
+        let waiting = """
+        {"pid":\(ProcessInfo.processInfo.processIdentifier),"sessionId":"approval-session","status":"waiting","waitingFor":"approve Bash","updatedAt":\(Int(now.timeIntervalSince1970 * 1_000))}
+        """
+        try waiting.write(to: runtimeSession, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(
+            rootURL: root,
+            runtimeSessionsURL: runtime
+        )
+        let waitingEvents = try monitor.poll(now: now)
+        expect(
+            waitingEvents.map(\.event).contains(.toolStarted(callID: "runtime-approval")),
+            "Claude approval wait should be executing"
+        )
+        expect(
+            !waitingEvents.map(\.event).contains(
+                .taskAborted(turnID: "prompt-1", reason: "inactive")
+            ),
+            "approval wait should not expire as inactive"
+        )
+
+        let resumedAt = now.addingTimeInterval(1)
+        let idle = """
+        {"pid":\(ProcessInfo.processInfo.processIdentifier),"sessionId":"approval-session","status":"idle","waitingFor":null,"updatedAt":\(Int(resumedAt.timeIntervalSince1970 * 1_000))}
+        """
+        try idle.write(to: runtimeSession, atomically: true, encoding: .utf8)
+        let resumedEvents = try monitor.poll(now: resumedAt)
+        expect(
+            resumedEvents.map(\.event) == [.toolFinished(callID: "runtime-approval")],
+            "leaving approval wait should finish the synthetic tool"
+        )
+    }
+}
+
+private func testClaudeApprovalSuppressesStaleThinkingTimeout() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        let transcript = project.appendingPathComponent("stale-approval.jsonl")
+        let runtimeSession = runtime.appendingPathComponent("current.json")
+        let oldPrompt = #"{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","sessionId":"stale-approval","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        try oldPrompt.write(to: transcript, atomically: true, encoding: .utf8)
+        let now = Date()
+        let waiting = """
+        {"pid":\(ProcessInfo.processInfo.processIdentifier),"sessionId":"stale-approval","status":"waiting","waitingFor":"approve Bash","updatedAt":\(Int(now.timeIntervalSince1970 * 1_000))}
+        """
+        try waiting.write(to: runtimeSession, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(
+            rootURL: root,
+            runtimeSessionsURL: runtime
+        )
+        let events = try monitor.poll(now: now)
+        expect(
+            !events.map(\.event).contains(
+                .taskAborted(turnID: "prompt-1", reason: "inactive")
+            ),
+            "a live approval wait should suppress stale thinking timeout"
+        )
+    }
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
@@ -576,6 +656,8 @@ testClaudeParserIgnoresMetaAndSidechainRecords()
 testClaudeMonitorTailsMainSessionsAndTracksCurrentTurn()
 testClaudeMonitorMapsTerminalFailureToCurrentTurn()
 testClaudeMonitorExpiresStaleThinkingButNotExecuting()
+testClaudeMonitorMapsRuntimeApprovalToExecuting()
+testClaudeApprovalSuppressesStaleThinkingTimeout()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)

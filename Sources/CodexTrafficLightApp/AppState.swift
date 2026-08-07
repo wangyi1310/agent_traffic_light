@@ -37,9 +37,19 @@ final class AppState {
             claudeRootURL = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude/projects", isDirectory: true)
         }
+        let claudeRuntimeRootURL: URL
+        if let override = environment["CLAUDE_CODE_RUNTIME_SESSION_ROOT"], !override.isEmpty {
+            claudeRuntimeRootURL = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            claudeRuntimeRootURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/sessions", isDirectory: true)
+        }
 
         codexMonitor = SessionLogMonitor(rootURL: codexRootURL)
-        claudeMonitor = ClaudeSessionLogMonitor(rootURL: claudeRootURL)
+        claudeMonitor = ClaudeSessionLogMonitor(
+            rootURL: claudeRootURL,
+            runtimeSessionsURL: claudeRuntimeRootURL
+        )
 
         codexMonitor.onEvents = { [weak self] events in
             DispatchQueue.main.async {

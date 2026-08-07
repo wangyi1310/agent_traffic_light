@@ -7,7 +7,7 @@
 | AI 状态 | 灯光表现 |
 | --- | --- |
 | 思考中 | 红、黄、绿依次循环，形成跑马灯 |
-| 执行工具 | 黄灯闪烁 |
+| 执行工具或等待命令审批 | 黄灯闪烁 |
 | 已完成 | 绿灯常亮，直到下一个任务开始 |
 | 任务出错 | 红灯闪烁，直到下一个任务开始或点击红灯确认 |
 | 空闲或主动取消 | 三灯熄灭 |
@@ -40,8 +40,8 @@ open "build/Codex Traffic Light.app"
 
 ## 数据与兼容性
 
-应用以只读方式增量监听 `~/.codex/sessions` 和 `~/.claude/projects`。Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话；Claude 只读取昨天零点以来有更新的主会话 JSONL，并排除 `subagents` 子代理记录。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
+应用以只读方式增量监听 `~/.codex/sessions`、`~/.claude/projects` 和 `~/.claude/sessions`。Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话；Claude 只读取昨天零点以来有更新的主会话 JSONL，并排除 `subagents` 子代理记录。Claude 运行时会话中的命令审批等待会显示为执行黄灯。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
 
 应用不修改、不注入也不自动控制 Codex 或 Claude Code，也不会修改 Claude Code hooks。任一客户端如果在未来更改本地 JSONL 结构或停止写入会话文件，应用需要相应更新。
 
-开发验收时可用进程环境变量 `CODEX_TRAFFIC_LIGHT_SESSION_ROOT` 和 `CLAUDE_CODE_SESSION_ROOT` 分别指向匿名临时会话目录；它们不是界面设置。
+开发验收时可用进程环境变量 `CODEX_TRAFFIC_LIGHT_SESSION_ROOT`、`CLAUDE_CODE_SESSION_ROOT` 和 `CLAUDE_CODE_RUNTIME_SESSION_ROOT` 分别指向匿名临时会话目录；它们不是界面设置。

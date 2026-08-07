@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public final class ClaudeSessionLogMonitor {
@@ -19,7 +20,13 @@ public final class ClaudeSessionLogMonitor {
         let event: MonitoredSessionEvent
     }
 
+    private struct RuntimeApproval {
+        let path: String
+        let timestamp: String
+    }
+
     private let rootURL: URL
+    private let runtimeSessionsURL: URL?
     private let pollInterval: TimeInterval
     private let inactivityTimeout: TimeInterval
     private let parser = ClaudeSessionLineParser()
@@ -31,14 +38,17 @@ public final class ClaudeSessionLogMonitor {
     private let queue = DispatchQueue(label: "local.codex.traffic-light.claude-session-monitor")
     private var timer: DispatchSourceTimer?
     private var cursors: [String: FileCursor] = [:]
+    private var activeRuntimeApprovals: [String: RuntimeApproval] = [:]
     private var lastAvailability: Bool?
 
     public init(
         rootURL: URL,
+        runtimeSessionsURL: URL? = nil,
         pollInterval: TimeInterval = 0.25,
         inactivityTimeout: TimeInterval = 10 * 60
     ) {
         self.rootURL = rootURL.standardizedFileURL
+        self.runtimeSessionsURL = runtimeSessionsURL?.standardizedFileURL
         self.pollInterval = pollInterval
         self.inactivityTimeout = inactivityTimeout
     }
@@ -52,7 +62,14 @@ public final class ClaudeSessionLogMonitor {
         for url in urls.sorted(by: { $0.path < $1.path }) {
             locatedEvents.append(contentsOf: try readNewEvents(from: url, now: now))
         }
-        locatedEvents.append(contentsOf: expireInactiveTurns(now: now))
+        let runtimeSnapshot = readRuntimeApprovals(now: now)
+        locatedEvents.append(contentsOf: runtimeSnapshot.events)
+        locatedEvents.append(
+            contentsOf: expireInactiveTurns(
+                now: now,
+                excludingSessionIDs: runtimeSnapshot.waitingSessionIDs
+            )
+        )
 
         return locatedEvents.sorted {
             if $0.event.timestamp != $1.event.timestamp {
@@ -232,13 +249,123 @@ public final class ClaudeSessionLogMonitor {
         }
     }
 
-    private func expireInactiveTurns(now: Date) -> [LocatedEvent] {
+    private func readRuntimeApprovals(
+        now: Date
+    ) -> (events: [LocatedEvent], waitingSessionIDs: Set<String>) {
+        guard let runtimeSessionsURL else { return ([], []) }
+
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: runtimeSessionsURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        var waitingApprovals: [String: RuntimeApproval] = [:]
+        var observedTimestamps: [String: String] = [:]
+
+        for url in urls.sorted(by: { $0.path < $1.path }) where url.pathExtension == "json" {
+            guard
+                let data = try? Data(contentsOf: url),
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let sessionID = object["sessionId"] as? String,
+                let pidNumber = object["pid"] as? NSNumber
+            else {
+                continue
+            }
+
+            let timestamp = runtimeTimestamp(object["updatedAt"], fallback: now)
+            observedTimestamps[sessionID] = timestamp
+            guard
+                isProcessAlive(pid: pidNumber.int32Value),
+                object["status"] as? String == "waiting",
+                let waitingFor = object["waitingFor"] as? String,
+                waitingFor.hasPrefix("approve ")
+            else {
+                continue
+            }
+
+            waitingApprovals[sessionID] = RuntimeApproval(
+                path: url.path,
+                timestamp: timestamp
+            )
+        }
+
+        var events: [LocatedEvent] = []
+        for sessionID in waitingApprovals.keys.sorted()
+        where activeRuntimeApprovals[sessionID] == nil {
+            guard let approval = waitingApprovals[sessionID] else { continue }
+            events.append(
+                runtimeApprovalEvent(
+                    path: approval.path,
+                    timestamp: approval.timestamp,
+                    sessionID: sessionID,
+                    event: .toolStarted(callID: "runtime-approval"),
+                    order: events.count
+                )
+            )
+        }
+
+        for sessionID in activeRuntimeApprovals.keys.sorted()
+        where waitingApprovals[sessionID] == nil {
+            guard let approval = activeRuntimeApprovals[sessionID] else { continue }
+            events.append(
+                runtimeApprovalEvent(
+                    path: approval.path,
+                    timestamp: observedTimestamps[sessionID]
+                        ?? timestampFormatter.string(from: now),
+                    sessionID: sessionID,
+                    event: .toolFinished(callID: "runtime-approval"),
+                    order: events.count
+                )
+            )
+        }
+
+        activeRuntimeApprovals = waitingApprovals
+        return (events, Set(waitingApprovals.keys))
+    }
+
+    private func runtimeApprovalEvent(
+        path: String,
+        timestamp: String,
+        sessionID: String,
+        event: SessionEvent,
+        order: Int
+    ) -> LocatedEvent {
+        LocatedEvent(
+            path: path,
+            order: order,
+            event: MonitoredSessionEvent(
+                timestamp: timestamp,
+                sessionID: sessionID,
+                event: event
+            )
+        )
+    }
+
+    private func runtimeTimestamp(_ value: Any?, fallback: Date) -> String {
+        guard let milliseconds = value as? NSNumber else {
+            return timestampFormatter.string(from: fallback)
+        }
+        return timestampFormatter.string(
+            from: Date(timeIntervalSince1970: milliseconds.doubleValue / 1_000)
+        )
+    }
+
+    private func isProcessAlive(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        return kill(pid_t(pid), 0) == 0 || errno == EPERM
+    }
+
+    private func expireInactiveTurns(
+        now: Date,
+        excludingSessionIDs: Set<String>
+    ) -> [LocatedEvent] {
         var events: [LocatedEvent] = []
         for path in cursors.keys.sorted() {
             guard var cursor = cursors[path] else { continue }
             guard
                 let sessionID = cursor.sessionID,
                 let turnID = cursor.currentTurnID,
+                !excludingSessionIDs.contains(sessionID),
                 cursor.outstandingCalls.isEmpty,
                 let lastActivityDate = cursor.lastActivityDate,
                 now.timeIntervalSince(lastActivityDate) >= inactivityTimeout
