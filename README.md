@@ -40,7 +40,7 @@ open "build/Codex Traffic Light.app"
 
 ## 数据与兼容性
 
-应用以只读方式增量监听 `~/.codex/sessions`、`~/.claude/projects` 和 `~/.claude/sessions`。Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话；Claude 只读取昨天零点以来有更新的主会话 JSONL，并排除 `subagents` 子代理记录。Claude 运行时会话中的命令审批等待会显示为执行黄灯。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
+应用以只读方式增量监听 `~/.codex/sessions`、`~/.claude/projects` 和 `~/.claude/sessions`。Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话；Claude 只读取昨天零点以来有更新的主会话 JSONL，并排除 `subagents` 子代理记录。Claude 运行时的 `busy` 状态会保持任务活动，命令审批等待会显示为执行黄灯。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
 
 应用不修改、不注入也不自动控制 Codex 或 Claude Code，也不会修改 Claude Code hooks。任一客户端如果在未来更改本地 JSONL 结构或停止写入会话文件，应用需要相应更新。
 

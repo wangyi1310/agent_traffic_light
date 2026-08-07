@@ -12,6 +12,7 @@ public final class ClaudeSessionLogMonitor {
         var currentTurnID: String?
         var lastActivityDate: Date?
         var outstandingCalls: Set<String> = []
+        var isInactive = false
     }
 
     private struct LocatedEvent {
@@ -62,12 +63,12 @@ public final class ClaudeSessionLogMonitor {
         for url in urls.sorted(by: { $0.path < $1.path }) {
             locatedEvents.append(contentsOf: try readNewEvents(from: url, now: now))
         }
-        let runtimeSnapshot = readRuntimeApprovals(now: now)
+        let runtimeSnapshot = readRuntimeStates(now: now)
         locatedEvents.append(contentsOf: runtimeSnapshot.events)
         locatedEvents.append(
             contentsOf: expireInactiveTurns(
                 now: now,
-                excludingSessionIDs: runtimeSnapshot.waitingSessionIDs
+                excludingSessionIDs: runtimeSnapshot.activeSessionIDs
             )
         )
 
@@ -210,12 +211,36 @@ public final class ClaudeSessionLogMonitor {
         guard let parsed = try? parser.parse(line) else { return }
         cursor.sessionID = parsed.sessionID
         cursor.lastActivityDate = parseTimestamp(parsed.timestamp) ?? now
+        let startsNewTurn = parsed.signals.contains { signal in
+            if case .taskStarted = signal {
+                return true
+            }
+            return false
+        }
+        if cursor.isInactive,
+           !startsNewTurn,
+           let turnID = cursor.currentTurnID,
+           !parsed.signals.isEmpty {
+            cursor.isInactive = false
+            events.append(
+                LocatedEvent(
+                    path: path,
+                    order: events.count,
+                    event: MonitoredSessionEvent(
+                        timestamp: parsed.timestamp,
+                        sessionID: parsed.sessionID,
+                        event: .taskStarted(turnID: turnID)
+                    )
+                )
+            )
+        }
         for signal in parsed.signals {
             let event: SessionEvent?
             switch signal {
             case let .taskStarted(turnID):
                 cursor.currentTurnID = turnID
                 cursor.outstandingCalls.removeAll()
+                cursor.isInactive = false
                 event = .taskStarted(turnID: turnID)
             case let .toolStarted(callID):
                 cursor.outstandingCalls.insert(callID)
@@ -227,11 +252,13 @@ public final class ClaudeSessionLogMonitor {
                 guard let turnID = cursor.currentTurnID else { continue }
                 cursor.currentTurnID = nil
                 cursor.outstandingCalls.removeAll()
+                cursor.isInactive = false
                 event = .taskCompleted(turnID: turnID)
             case .failed:
                 event = .taskFailed(turnID: cursor.currentTurnID)
                 cursor.currentTurnID = nil
                 cursor.outstandingCalls.removeAll()
+                cursor.isInactive = false
             }
 
             guard let event else { continue }
@@ -249,9 +276,9 @@ public final class ClaudeSessionLogMonitor {
         }
     }
 
-    private func readRuntimeApprovals(
+    private func readRuntimeStates(
         now: Date
-    ) -> (events: [LocatedEvent], waitingSessionIDs: Set<String>) {
+    ) -> (events: [LocatedEvent], activeSessionIDs: Set<String>) {
         guard let runtimeSessionsURL else { return ([], []) }
 
         let urls = (try? FileManager.default.contentsOfDirectory(
@@ -259,6 +286,7 @@ public final class ClaudeSessionLogMonitor {
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )) ?? []
+        var activeSessions: [String: RuntimeApproval] = [:]
         var waitingApprovals: [String: RuntimeApproval] = [:]
         var observedTimestamps: [String: String] = [:]
 
@@ -274,22 +302,31 @@ public final class ClaudeSessionLogMonitor {
 
             let timestamp = runtimeTimestamp(object["updatedAt"], fallback: now)
             observedTimestamps[sessionID] = timestamp
-            guard
-                isProcessAlive(pid: pidNumber.int32Value),
-                object["status"] as? String == "waiting",
-                let waitingFor = object["waitingFor"] as? String,
-                waitingFor.hasPrefix("approve ")
-            else {
-                continue
-            }
+            guard isProcessAlive(pid: pidNumber.int32Value) else { continue }
 
-            waitingApprovals[sessionID] = RuntimeApproval(
-                path: url.path,
-                timestamp: timestamp
-            )
+            let runtimeSession = RuntimeApproval(path: url.path, timestamp: timestamp)
+            let status = object["status"] as? String
+            let waitingFor = object["waitingFor"] as? String
+            if status == "busy"
+                || (status == "waiting" && waitingFor?.hasPrefix("approve ") == true) {
+                activeSessions[sessionID] = runtimeSession
+            }
+            if status == "waiting" && waitingFor?.hasPrefix("approve ") == true {
+                waitingApprovals[sessionID] = runtimeSession
+            }
         }
 
         var events: [LocatedEvent] = []
+        for sessionID in activeSessions.keys.sorted() {
+            guard let runtimeSession = activeSessions[sessionID] else { continue }
+            refreshRuntimeSession(
+                sessionID: sessionID,
+                path: runtimeSession.path,
+                timestamp: runtimeSession.timestamp,
+                now: now,
+                events: &events
+            )
+        }
         for sessionID in waitingApprovals.keys.sorted()
         where activeRuntimeApprovals[sessionID] == nil {
             guard let approval = waitingApprovals[sessionID] else { continue }
@@ -320,7 +357,40 @@ public final class ClaudeSessionLogMonitor {
         }
 
         activeRuntimeApprovals = waitingApprovals
-        return (events, Set(waitingApprovals.keys))
+        return (events, Set(activeSessions.keys))
+    }
+
+    private func refreshRuntimeSession(
+        sessionID: String,
+        path: String,
+        timestamp: String,
+        now: Date,
+        events: inout [LocatedEvent]
+    ) {
+        for cursorPath in cursors.keys.sorted() {
+            guard
+                var cursor = cursors[cursorPath],
+                cursor.sessionID == sessionID
+            else {
+                continue
+            }
+
+            cursor.lastActivityDate = now
+            if cursor.isInactive, let turnID = cursor.currentTurnID {
+                cursor.isInactive = false
+                events.append(
+                    runtimeApprovalEvent(
+                        path: path,
+                        timestamp: timestamp,
+                        sessionID: sessionID,
+                        event: .taskStarted(turnID: turnID),
+                        order: events.count
+                    )
+                )
+            }
+            cursors[cursorPath] = cursor
+            return
+        }
     }
 
     private func runtimeApprovalEvent(
@@ -365,6 +435,7 @@ public final class ClaudeSessionLogMonitor {
             guard
                 let sessionID = cursor.sessionID,
                 let turnID = cursor.currentTurnID,
+                !cursor.isInactive,
                 !excludingSessionIDs.contains(sessionID),
                 cursor.outstandingCalls.isEmpty,
                 let lastActivityDate = cursor.lastActivityDate,
@@ -373,8 +444,7 @@ public final class ClaudeSessionLogMonitor {
                 continue
             }
 
-            cursor.currentTurnID = nil
-            cursor.lastActivityDate = nil
+            cursor.isInactive = true
             cursors[path] = cursor
             events.append(
                 LocatedEvent(

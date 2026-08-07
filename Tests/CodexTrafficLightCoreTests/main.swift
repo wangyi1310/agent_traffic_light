@@ -634,6 +634,78 @@ private func testClaudeApprovalSuppressesStaleThinkingTimeout() {
     }
 }
 
+private func testClaudeMonitorResumesInactiveTurnWhenActivityReturns() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let transcript = project.appendingPathComponent("resumed.jsonl")
+        let oldPrompt = #"{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","sessionId":"resumed-session","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        try oldPrompt.write(to: transcript, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(rootURL: root)
+        var reducer = SessionStateReducer()
+        for event in try monitor.poll() {
+            reducer.apply(event.event, sessionID: event.sessionID)
+        }
+        expect(reducer.state == .idle, "stale Claude turn should first become idle")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let tool = """
+        {"type":"assistant","timestamp":"\(timestamp)","sessionId":"resumed-session","uuid":"assistant-1","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-1","name":"Agent"}]}}
+        """ + "\n"
+        try append(tool, to: transcript)
+        let resumedEvents = try monitor.poll()
+        for event in resumedEvents {
+            reducer.apply(event.event, sessionID: event.sessionID)
+        }
+
+        expect(
+            resumedEvents.map(\.event).contains(.taskStarted(turnID: "prompt-1")),
+            "new Claude activity should restore the inactive turn"
+        )
+        expect(reducer.state == .executing, "restored Claude tool should show executing")
+    }
+}
+
+private func testClaudeRuntimeBusyRestoresInactiveTurn() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        let transcript = project.appendingPathComponent("busy.jsonl")
+        let runtimeSession = runtime.appendingPathComponent("current.json")
+        let oldPrompt = #"{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","sessionId":"busy-session","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        try oldPrompt.write(to: transcript, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(
+            rootURL: root,
+            runtimeSessionsURL: runtime
+        )
+        var reducer = SessionStateReducer()
+        for event in try monitor.poll() {
+            reducer.apply(event.event, sessionID: event.sessionID)
+        }
+        expect(reducer.state == .idle, "stale runtime test turn should first become idle")
+
+        let now = Date()
+        let busy = """
+        {"pid":\(ProcessInfo.processInfo.processIdentifier),"sessionId":"busy-session","status":"busy","waitingFor":null,"updatedAt":\(Int(now.timeIntervalSince1970 * 1_000))}
+        """
+        try busy.write(to: runtimeSession, atomically: true, encoding: .utf8)
+        let events = try monitor.poll(now: now)
+        for event in events {
+            reducer.apply(event.event, sessionID: event.sessionID)
+        }
+
+        expect(
+            events.map(\.event).contains(.taskStarted(turnID: "prompt-1")),
+            "busy Claude runtime should restore an inactive turn"
+        )
+        expect(reducer.state == .thinking, "busy runtime without a tool should show thinking")
+    }
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
@@ -658,6 +730,8 @@ testClaudeMonitorMapsTerminalFailureToCurrentTurn()
 testClaudeMonitorExpiresStaleThinkingButNotExecuting()
 testClaudeMonitorMapsRuntimeApprovalToExecuting()
 testClaudeApprovalSuppressesStaleThinkingTimeout()
+testClaudeMonitorResumesInactiveTurnWhenActivityReturns()
+testClaudeRuntimeBusyRestoresInactiveTurn()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)
