@@ -14,6 +14,8 @@
 
 Codex Desktop 和 Claude Code 的多个任务并发时，统一按 `出错 > 执行 > 思考 > 完成 > 空闲` 汇总。
 
+Claude Code 处于思考状态且连续 10 分钟没有新的状态日志时，会自动回到空闲；正在执行的工具调用不受此超时影响。
+
 ## 构建与运行
 
 要求 macOS 13 或更高版本，并安装 Apple Command Line Tools。

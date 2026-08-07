@@ -87,6 +87,18 @@ private func testNonInterruptionAbortLatchesErrorUntilAcknowledged() {
     expect(reducer.state == .idle, "acknowledgement should clear error")
 }
 
+private func testInactiveTurnReturnsToIdle() {
+    var reducer = SessionStateReducer()
+    reducer.apply(.taskStarted(turnID: "turn-1"), sessionID: "session-1")
+
+    reducer.apply(
+        .taskAborted(turnID: "turn-1", reason: "inactive"),
+        sessionID: "session-1"
+    )
+
+    expect(reducer.state == .idle, "inactive Claude turn should return to idle")
+}
+
 private func testReasoningDoesNotEndAnOutstandingToolCall() {
     var reducer = SessionStateReducer()
     reducer.apply(.taskStarted(turnID: "turn-1"), sessionID: "session-1")
@@ -483,12 +495,57 @@ private func testClaudeMonitorMapsTerminalFailureToCurrentTurn() {
     }
 }
 
+private func testClaudeMonitorExpiresStaleThinkingButNotExecuting() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let thinking = project.appendingPathComponent("stale-thinking.jsonl")
+        let executing = project.appendingPathComponent("stale-executing.jsonl")
+        let oldPrompt = #"{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","sessionId":"stale-thinking","uuid":"user-1","promptId":"prompt-thinking","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        let executingPrompt = oldPrompt
+            .replacingOccurrences(of: "stale-thinking", with: "stale-executing")
+            .replacingOccurrences(of: "prompt-thinking", with: "prompt-executing")
+        let tool = #"{"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","sessionId":"stale-executing","uuid":"assistant-1","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-1"}]}}"# + "\n"
+        try oldPrompt.write(to: thinking, atomically: true, encoding: .utf8)
+        try (executingPrompt + tool).write(to: executing, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(rootURL: root)
+        let events = try monitor.poll()
+
+        expect(
+            events.contains(
+                MonitoredSessionEvent(
+                    timestamp: "2020-01-01T00:00:00.000Z",
+                    sessionID: "stale-thinking",
+                    event: .taskStarted(turnID: "prompt-thinking")
+                )
+            ),
+            "stale Claude prompt should first be observed"
+        )
+        expect(
+            events.contains(where: {
+                $0.sessionID == "stale-thinking"
+                    && $0.event == .taskAborted(turnID: "prompt-thinking", reason: "inactive")
+            }),
+            "stale thinking should expire to idle"
+        )
+        expect(
+            !events.contains(where: {
+                $0.sessionID == "stale-executing"
+                    && $0.event == .taskAborted(turnID: "prompt-executing", reason: "inactive")
+            }),
+            "an outstanding Claude tool should not expire"
+        )
+    }
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
 testNewTaskClearsErrorLatch()
 testInterruptedTurnReturnsToIdle()
 testNonInterruptionAbortLatchesErrorUntilAcknowledged()
+testInactiveTurnReturnsToIdle()
 testReasoningDoesNotEndAnOutstandingToolCall()
 testParserReadsOnlyMetadataIdentity()
 testParserMapsTaskAndToolEvents()
@@ -502,6 +559,7 @@ testClaudeParserMapsOnlyTerminalErrorsToFailure()
 testClaudeParserIgnoresMetaAndSidechainRecords()
 testClaudeMonitorTailsMainSessionsAndTracksCurrentTurn()
 testClaudeMonitorMapsTerminalFailureToCurrentTurn()
+testClaudeMonitorExpiresStaleThinkingButNotExecuting()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)

@@ -7,7 +7,10 @@ public final class ClaudeSessionLogMonitor {
     private struct FileCursor {
         var offset: UInt64 = 0
         var incompleteLine = Data()
+        var sessionID: String?
         var currentTurnID: String?
+        var lastActivityDate: Date?
+        var outstandingCalls: Set<String> = []
     }
 
     private struct LocatedEvent {
@@ -18,26 +21,38 @@ public final class ClaudeSessionLogMonitor {
 
     private let rootURL: URL
     private let pollInterval: TimeInterval
+    private let inactivityTimeout: TimeInterval
     private let parser = ClaudeSessionLineParser()
+    private let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
     private let queue = DispatchQueue(label: "local.codex.traffic-light.claude-session-monitor")
     private var timer: DispatchSourceTimer?
     private var cursors: [String: FileCursor] = [:]
     private var lastAvailability: Bool?
 
-    public init(rootURL: URL, pollInterval: TimeInterval = 0.25) {
+    public init(
+        rootURL: URL,
+        pollInterval: TimeInterval = 0.25,
+        inactivityTimeout: TimeInterval = 10 * 60
+    ) {
         self.rootURL = rootURL.standardizedFileURL
         self.pollInterval = pollInterval
+        self.inactivityTimeout = inactivityTimeout
     }
 
-    public func poll() throws -> [MonitoredSessionEvent] {
-        let urls = try discoverSessionFiles()
+    public func poll(now: Date = Date()) throws -> [MonitoredSessionEvent] {
+        let urls = try discoverSessionFiles(now: now)
         let currentPaths = Set(urls.map(\.path))
         cursors = cursors.filter { currentPaths.contains($0.key) }
 
         var locatedEvents: [LocatedEvent] = []
         for url in urls.sorted(by: { $0.path < $1.path }) {
-            locatedEvents.append(contentsOf: try readNewEvents(from: url))
+            locatedEvents.append(contentsOf: try readNewEvents(from: url, now: now))
         }
+        locatedEvents.append(contentsOf: expireInactiveTurns(now: now))
 
         return locatedEvents.sorted {
             if $0.event.timestamp != $1.event.timestamp {
@@ -128,7 +143,7 @@ public final class ClaudeSessionLogMonitor {
         return files
     }
 
-    private func readNewEvents(from url: URL) throws -> [LocatedEvent] {
+    private func readNewEvents(from url: URL, now: Date) throws -> [LocatedEvent] {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         var cursor = cursors[url.path] ?? FileCursor()
@@ -158,7 +173,7 @@ public final class ClaudeSessionLogMonitor {
                 line.removeLast()
             }
             if !line.isEmpty {
-                parse(line, path: url.path, cursor: &cursor, events: &events)
+                parse(line, path: url.path, now: now, cursor: &cursor, events: &events)
             }
             lineStart = combined.index(after: index)
         }
@@ -171,27 +186,35 @@ public final class ClaudeSessionLogMonitor {
     private func parse(
         _ line: Data,
         path: String,
+        now: Date,
         cursor: inout FileCursor,
         events: inout [LocatedEvent]
     ) {
         guard let parsed = try? parser.parse(line) else { return }
+        cursor.sessionID = parsed.sessionID
+        cursor.lastActivityDate = parseTimestamp(parsed.timestamp) ?? now
         for signal in parsed.signals {
             let event: SessionEvent?
             switch signal {
             case let .taskStarted(turnID):
                 cursor.currentTurnID = turnID
+                cursor.outstandingCalls.removeAll()
                 event = .taskStarted(turnID: turnID)
             case let .toolStarted(callID):
+                cursor.outstandingCalls.insert(callID)
                 event = .toolStarted(callID: callID)
             case let .toolFinished(callID):
+                cursor.outstandingCalls.remove(callID)
                 event = .toolFinished(callID: callID)
             case .completed:
                 guard let turnID = cursor.currentTurnID else { continue }
                 cursor.currentTurnID = nil
+                cursor.outstandingCalls.removeAll()
                 event = .taskCompleted(turnID: turnID)
             case .failed:
                 event = .taskFailed(turnID: cursor.currentTurnID)
                 cursor.currentTurnID = nil
+                cursor.outstandingCalls.removeAll()
             }
 
             guard let event else { continue }
@@ -207,5 +230,44 @@ public final class ClaudeSessionLogMonitor {
                 )
             )
         }
+    }
+
+    private func expireInactiveTurns(now: Date) -> [LocatedEvent] {
+        var events: [LocatedEvent] = []
+        for path in cursors.keys.sorted() {
+            guard var cursor = cursors[path] else { continue }
+            guard
+                let sessionID = cursor.sessionID,
+                let turnID = cursor.currentTurnID,
+                cursor.outstandingCalls.isEmpty,
+                let lastActivityDate = cursor.lastActivityDate,
+                now.timeIntervalSince(lastActivityDate) >= inactivityTimeout
+            else {
+                continue
+            }
+
+            cursor.currentTurnID = nil
+            cursor.lastActivityDate = nil
+            cursors[path] = cursor
+            events.append(
+                LocatedEvent(
+                    path: path,
+                    order: events.count,
+                    event: MonitoredSessionEvent(
+                        timestamp: timestampFormatter.string(from: now),
+                        sessionID: sessionID,
+                        event: .taskAborted(turnID: turnID, reason: "inactive")
+                    )
+                )
+            )
+        }
+        return events
+    }
+
+    private func parseTimestamp(_ timestamp: String) -> Date? {
+        if let date = timestampFormatter.date(from: timestamp) {
+            return date
+        }
+        return ISO8601DateFormatter().date(from: timestamp)
     }
 }

@@ -60,7 +60,7 @@ public struct SessionStateReducer: Sendable {
 
         case let .taskAborted(turnID, reason):
             removeTurn(sessionID: sessionID, turnID: turnID)
-            if reason != "interrupted" {
+            if reason != "interrupted" && reason != "inactive" {
                 terminalLatch = .error
             }
 
