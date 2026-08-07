@@ -7,43 +7,61 @@ final class AppState {
     var onMonitoringAvailabilityChanged: ((Bool) -> Void)?
 
     private var reducer = SessionStateReducer()
-    private let monitor: SessionLogMonitor
+    private let codexMonitor: SessionLogMonitor
+    private let claudeMonitor: ClaudeSessionLogMonitor
+    private var codexMonitorAvailable = false
+    private var claudeMonitorAvailable = false
+    private var publishedAvailability: Bool?
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        let rootURL: URL
+        let codexRootURL: URL
         if let override = environment["CODEX_TRAFFIC_LIGHT_SESSION_ROOT"], !override.isEmpty {
-            rootURL = URL(fileURLWithPath: override, isDirectory: true)
+            codexRootURL = URL(fileURLWithPath: override, isDirectory: true)
         } else {
-            rootURL = FileManager.default.homeDirectoryForCurrentUser
+            codexRootURL = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex/sessions", isDirectory: true)
         }
-        monitor = SessionLogMonitor(rootURL: rootURL)
+        let claudeRootURL: URL
+        if let override = environment["CLAUDE_CODE_SESSION_ROOT"], !override.isEmpty {
+            claudeRootURL = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            claudeRootURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/projects", isDirectory: true)
+        }
 
-        monitor.onEvents = { [weak self] events in
+        codexMonitor = SessionLogMonitor(rootURL: codexRootURL)
+        claudeMonitor = ClaudeSessionLogMonitor(rootURL: claudeRootURL)
+
+        codexMonitor.onEvents = { [weak self] events in
             DispatchQueue.main.async {
-                guard let self else { return }
-                for monitoredEvent in events {
-                    self.reducer.apply(
-                        monitoredEvent.event,
-                        sessionID: monitoredEvent.sessionID
-                    )
-                }
-                self.publishState()
+                self?.receive(events, source: "codex")
             }
         }
-        monitor.onAvailabilityChanged = { [weak self] available in
+        claudeMonitor.onEvents = { [weak self] events in
             DispatchQueue.main.async {
-                self?.onMonitoringAvailabilityChanged?(available)
+                self?.receive(events, source: "claude")
+            }
+        }
+        codexMonitor.onAvailabilityChanged = { [weak self] available in
+            DispatchQueue.main.async {
+                self?.updateAvailability(codex: available)
+            }
+        }
+        claudeMonitor.onAvailabilityChanged = { [weak self] available in
+            DispatchQueue.main.async {
+                self?.updateAvailability(claude: available)
             }
         }
     }
 
     func start() {
-        monitor.start()
+        codexMonitor.start()
+        claudeMonitor.start()
     }
 
     func stop() {
-        monitor.stop()
+        codexMonitor.stop()
+        claudeMonitor.stop()
     }
 
     func acknowledgeError() {
@@ -56,5 +74,29 @@ final class AppState {
         guard newState != state else { return }
         state = newState
         onStateChanged?(newState)
+    }
+
+    private func receive(_ events: [MonitoredSessionEvent], source: String) {
+        for monitoredEvent in events {
+            reducer.apply(
+                monitoredEvent.event,
+                sessionID: "\(source):\(monitoredEvent.sessionID)"
+            )
+        }
+        publishState()
+    }
+
+    private func updateAvailability(codex: Bool? = nil, claude: Bool? = nil) {
+        if let codex {
+            codexMonitorAvailable = codex
+        }
+        if let claude {
+            claudeMonitorAvailable = claude
+        }
+
+        let available = codexMonitorAvailable || claudeMonitorAvailable
+        guard available != publishedAvailability else { return }
+        publishedAvailability = available
+        onMonitoringAvailabilityChanged?(available)
     }
 }

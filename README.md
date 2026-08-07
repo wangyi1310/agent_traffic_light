@@ -1,10 +1,10 @@
 # Codex Traffic Light
 
-一个只监控 Codex Desktop 的原生 macOS 状态红绿灯。它同时提供菜单栏图标和可拖动、始终置顶的悬浮交通灯。
+一个监控 Codex Desktop 和 Claude Code 的原生 macOS 状态红绿灯。它同时提供菜单栏图标和可拖动、始终置顶的悬浮交通灯。
 
 ## 状态
 
-| Codex 状态 | 灯光表现 |
+| AI 状态 | 灯光表现 |
 | --- | --- |
 | 思考中 | 红、黄、绿依次循环，形成跑马灯 |
 | 执行工具 | 黄灯闪烁 |
@@ -12,7 +12,7 @@
 | 任务出错 | 红灯闪烁，直到下一个任务开始或点击红灯确认 |
 | 空闲或主动取消 | 三灯熄灭 |
 
-多个桌面任务并发时按 `出错 > 执行 > 思考 > 完成 > 空闲` 汇总。
+Codex Desktop 和 Claude Code 的多个任务并发时，统一按 `出错 > 执行 > 思考 > 完成 > 空闲` 汇总。
 
 ## 构建与运行
 
@@ -37,8 +37,8 @@ open "build/Codex Traffic Light.app"
 
 ## 数据与兼容性
 
-应用以只读方式增量监听 `~/.codex/sessions`，并且只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
+应用以只读方式增量监听 `~/.codex/sessions` 和 `~/.claude/projects`。Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话；Claude 只读取昨天零点以来有更新的主会话 JSONL，并排除 `subagents` 子代理记录。解析器只提取时间戳、会话/任务/调用标识和状态字段，不展示或持久化提示词、回复、推理、工具输入或工具输出。
 
-应用不修改、不注入也不自动控制 Codex。Codex Desktop 如果在未来更改本地 JSONL 事件名称或停止写入会话文件，应用需要相应更新。
+应用不修改、不注入也不自动控制 Codex 或 Claude Code，也不会修改 Claude Code hooks。任一客户端如果在未来更改本地 JSONL 结构或停止写入会话文件，应用需要相应更新。
 
-开发验收时可用进程环境变量 `CODEX_TRAFFIC_LIGHT_SESSION_ROOT` 指向匿名临时会话目录；它不是界面设置。
+开发验收时可用进程环境变量 `CODEX_TRAFFIC_LIGHT_SESSION_ROOT` 和 `CLAUDE_CODE_SESSION_ROOT` 分别指向匿名临时会话目录；它们不是界面设置。

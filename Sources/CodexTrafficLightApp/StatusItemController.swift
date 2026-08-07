@@ -22,7 +22,7 @@ final class StatusItemController: NSObject {
                 trafficLightView.topAnchor.constraint(equalTo: button.topAnchor),
                 trafficLightView.bottomAnchor.constraint(equalTo: button.bottomAnchor),
             ])
-            button.toolTip = "Codex：空闲"
+            button.toolTip = "AI：空闲"
         }
 
         toggleItem.target = self
@@ -40,7 +40,7 @@ final class StatusItemController: NSObject {
 
     func update(state: TrafficLightState) {
         trafficLightView.state = state
-        statusItem.button?.toolTip = "Codex：\(stateTitle(state))"
+        statusItem.button?.toolTip = "AI：\(stateTitle(state))"
     }
 
     func updatePanelVisibility(_ visible: Bool) {

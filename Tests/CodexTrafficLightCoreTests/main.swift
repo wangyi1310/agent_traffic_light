@@ -333,6 +333,156 @@ private func testLampFramesMatchEveryTrafficLightState() {
     )
 }
 
+private func parseClaudeLine(
+    _ json: String,
+    with parser: ClaudeSessionLineParser
+) -> ParsedClaudeSessionLine? {
+    do {
+        return try parser.parse(Data(json.utf8))
+    } catch {
+        expect(false, "valid Claude JSON should parse: \(error)")
+        return nil
+    }
+}
+
+private func testClaudeParserMapsPromptParallelToolsAndCompletion() {
+    let parser = ClaudeSessionLineParser()
+    let prompt = #"{"type":"user","timestamp":"01","sessionId":"claude-1","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"#
+    let tools = #"{"type":"assistant","timestamp":"02","sessionId":"claude-1","uuid":"assistant-1","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{}},{"type":"tool_use","id":"tool-2","name":"Bash","input":{}}]}}"#
+    let results = #"{"type":"user","timestamp":"03","sessionId":"claude-1","uuid":"user-2","isSidechain":false,"toolUseResult":{},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","is_error":false,"content":"ignored"},{"type":"tool_result","tool_use_id":"tool-2","is_error":true,"content":"ignored"}]}}"#
+    let completed = #"{"type":"assistant","timestamp":"04","sessionId":"claude-1","uuid":"assistant-2","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ignored"}]}}"#
+
+    expect(
+        parseClaudeLine(prompt, with: parser)?.signals == [.taskStarted(turnID: "prompt-1")],
+        "Claude user prompt should start thinking"
+    )
+    expect(
+        parseClaudeLine(tools, with: parser)?.signals == [
+            .toolStarted(callID: "tool-1"),
+            .toolStarted(callID: "tool-2"),
+        ],
+        "all parallel Claude tool uses should start"
+    )
+    expect(
+        parseClaudeLine(results, with: parser)?.signals == [
+            .toolFinished(callID: "tool-1"),
+            .toolFinished(callID: "tool-2"),
+        ],
+        "tool results, including recoverable failures, should finish calls"
+    )
+    expect(
+        parseClaudeLine(completed, with: parser)?.signals == [.completed],
+        "Claude end_turn should complete the task"
+    )
+}
+
+private func testClaudeParserMapsOnlyTerminalErrorsToFailure() {
+    let parser = ClaudeSessionLineParser()
+    let transientError = #"{"type":"system","subtype":"api_error","timestamp":"01","sessionId":"claude-1","isSidechain":false,"level":"error","retryAttempt":1}"#
+    let finalError = #"{"type":"assistant","timestamp":"02","sessionId":"claude-1","uuid":"assistant-error","isSidechain":false,"isApiErrorMessage":true,"error":"anonymous error","message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"ignored"}]}}"#
+    let maxTokens = #"{"type":"assistant","timestamp":"03","sessionId":"claude-1","uuid":"assistant-max","isSidechain":false,"message":{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"thinking","thinking":"ignored"}]}}"#
+
+    expect(
+        parseClaudeLine(transientError, with: parser) == nil,
+        "retryable system api_error should not latch red"
+    )
+    expect(
+        parseClaudeLine(finalError, with: parser)?.signals == [.failed],
+        "final Claude API error should latch red"
+    )
+    expect(
+        parseClaudeLine(maxTokens, with: parser)?.signals == [.failed],
+        "max_tokens termination should latch red"
+    )
+}
+
+private func testClaudeParserIgnoresMetaAndSidechainRecords() {
+    let parser = ClaudeSessionLineParser()
+    let sidechain = #"{"type":"user","timestamp":"01","sessionId":"claude-1","uuid":"sidechain","promptId":"prompt-side","isSidechain":true,"message":{"role":"user","content":"ignored"}}"#
+    let meta = #"{"type":"user","timestamp":"02","sessionId":"claude-1","uuid":"meta","promptId":"prompt-meta","isSidechain":false,"isMeta":true,"message":{"role":"user","content":"ignored"}}"#
+    let compact = #"{"type":"user","timestamp":"03","sessionId":"claude-1","uuid":"compact","promptId":"prompt-compact","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"ignored"}}"#
+
+    expect(parseClaudeLine(sidechain, with: parser) == nil, "sidechain should be ignored")
+    expect(parseClaudeLine(meta, with: parser) == nil, "meta user message should be ignored")
+    expect(parseClaudeLine(compact, with: parser) == nil, "compact summary should be ignored")
+}
+
+private func testClaudeMonitorTailsMainSessionsAndTracksCurrentTurn() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let subagents = project.appendingPathComponent("subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
+        let main = project.appendingPathComponent("claude-1.jsonl")
+        let subagent = subagents.appendingPathComponent("agent-1.jsonl")
+
+        let prompt = #"{"type":"user","timestamp":"01","sessionId":"claude-1","uuid":"user-1","promptId":"prompt-1","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        let tools = #"{"type":"assistant","timestamp":"02","sessionId":"claude-1","uuid":"assistant-1","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-1"},{"type":"tool_use","id":"tool-2"}]}}"# + "\n"
+        try (prompt + tools).write(to: main, atomically: true, encoding: .utf8)
+        try prompt.replacingOccurrences(of: "claude-1", with: "subagent-1")
+            .write(to: subagent, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(rootURL: root)
+        let first = try monitor.poll()
+        expect(
+            first == [
+                MonitoredSessionEvent(
+                    timestamp: "01",
+                    sessionID: "claude-1",
+                    event: .taskStarted(turnID: "prompt-1")
+                ),
+                MonitoredSessionEvent(
+                    timestamp: "02",
+                    sessionID: "claude-1",
+                    event: .toolStarted(callID: "tool-1")
+                ),
+                MonitoredSessionEvent(
+                    timestamp: "02",
+                    sessionID: "claude-1",
+                    event: .toolStarted(callID: "tool-2")
+                ),
+            ],
+            "Claude monitor should emit main-session prompt and parallel tools only"
+        )
+
+        let results = #"{"type":"user","timestamp":"03","sessionId":"claude-1","uuid":"user-2","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1"},{"type":"tool_result","tool_use_id":"tool-2"}]}}"# + "\n"
+        let completed = #"{"type":"assistant","timestamp":"04","sessionId":"claude-1","uuid":"assistant-2","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[]}}"# + "\n"
+        try append(results + completed, to: main)
+
+        let second = try monitor.poll()
+        expect(
+            second.map(\.event) == [
+                .toolFinished(callID: "tool-1"),
+                .toolFinished(callID: "tool-2"),
+                .taskCompleted(turnID: "prompt-1"),
+            ],
+            "Claude completion should finish tools and the current prompt"
+        )
+        let third = try monitor.poll()
+        expect(third.isEmpty, "unchanged Claude logs should not repeat events")
+    }
+}
+
+private func testClaudeMonitorMapsTerminalFailureToCurrentTurn() {
+    withTemporaryDirectory { root in
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let main = project.appendingPathComponent("claude-error.jsonl")
+        let prompt = #"{"type":"user","timestamp":"01","sessionId":"claude-error","uuid":"user-1","promptId":"prompt-error","isSidechain":false,"message":{"role":"user","content":"anonymous prompt"}}"# + "\n"
+        let failed = #"{"type":"assistant","timestamp":"02","sessionId":"claude-error","uuid":"assistant-error","isSidechain":false,"isApiErrorMessage":true,"error":"anonymous error","message":{"role":"assistant","stop_reason":"stop_sequence","content":[]}}"# + "\n"
+        try (prompt + failed).write(to: main, atomically: true, encoding: .utf8)
+
+        let monitor = ClaudeSessionLogMonitor(rootURL: root)
+        let events = try monitor.poll()
+        expect(
+            events.map(\.event) == [
+                .taskStarted(turnID: "prompt-error"),
+                .taskFailed(turnID: "prompt-error"),
+            ],
+            "Claude terminal failure should fail the current prompt"
+        )
+    }
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
@@ -347,6 +497,11 @@ testMonitorFiltersOriginatorAndTailsNewEvents()
 testMonitorBuffersPartialLinesAndRecoversAfterMalformedLine()
 testMonitorSortsFilesByTimestampAndRestartsAfterTruncation()
 testLampFramesMatchEveryTrafficLightState()
+testClaudeParserMapsPromptParallelToolsAndCompletion()
+testClaudeParserMapsOnlyTerminalErrorsToFailure()
+testClaudeParserIgnoresMetaAndSidechainRecords()
+testClaudeMonitorTailsMainSessionsAndTracksCurrentTurn()
+testClaudeMonitorMapsTerminalFailureToCurrentTurn()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)
