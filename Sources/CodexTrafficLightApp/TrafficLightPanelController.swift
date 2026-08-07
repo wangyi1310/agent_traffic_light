@@ -11,7 +11,7 @@ final class TrafficLightPanelController: NSObject {
     var isVisible: Bool { panel.isVisible }
 
     init(onAcknowledgeError: @escaping () -> Void) {
-        let size = NSSize(width: 78, height: 188)
+        let size = NSSize(width: 39, height: 94)
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],

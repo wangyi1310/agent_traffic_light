@@ -79,12 +79,12 @@ final class TrafficLightView: NSView {
     }
 
     private func drawHousing() {
-        let housingRect = bounds.insetBy(dx: 2, dy: 2)
-        let path = NSBezierPath(roundedRect: housingRect, xRadius: 8, yRadius: 8)
+        let housingRect = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: housingRect, xRadius: 4, yRadius: 4)
         NSColor(calibratedWhite: 0.09, alpha: 0.96).setFill()
         path.fill()
         NSColor(calibratedWhite: 0.35, alpha: 0.55).setStroke()
-        path.lineWidth = 1
+        path.lineWidth = 0.5
         path.stroke()
     }
 
@@ -100,7 +100,7 @@ final class TrafficLightView: NSView {
         if isLit {
             let shadow = NSShadow()
             shadow.shadowColor = baseColor.withAlphaComponent(0.75)
-            shadow.shadowBlurRadius = orientation == .vertical ? 14 : 5
+            shadow.shadowBlurRadius = orientation == .vertical ? 7 : 5
             shadow.shadowOffset = .zero
             shadow.set()
         }
@@ -109,7 +109,7 @@ final class TrafficLightView: NSView {
         (isLit ? baseColor : baseColor.withAlphaComponent(0.18)).setFill()
         path.fill()
         NSColor(calibratedWhite: isLit ? 1 : 0.45, alpha: isLit ? 0.35 : 0.18).setStroke()
-        path.lineWidth = 1
+        path.lineWidth = orientation == .vertical ? 0.5 : 1
         path.stroke()
         NSGraphicsContext.restoreGraphicsState()
     }
@@ -128,8 +128,8 @@ final class TrafficLightView: NSView {
                 .green: NSRect(x: startX + (diameter + gap) * 2, y: y, width: diameter, height: diameter),
             ]
         case .vertical:
-            let gap: CGFloat = 10
-            let diameter = min(bounds.width - 24, (bounds.height - 32 - gap * 2) / 3)
+            let gap: CGFloat = 5
+            let diameter = min(bounds.width - 12, (bounds.height - 16 - gap * 2) / 3)
             let x = (bounds.width - diameter) / 2
             let totalHeight = diameter * 3 + gap * 2
             let startY = (bounds.height - totalHeight) / 2
