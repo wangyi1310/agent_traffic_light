@@ -345,6 +345,21 @@ private func testLampFramesMatchEveryTrafficLightState() {
     )
 }
 
+private func testSourceStatesAggregateByPriority() {
+    expect(
+        TrafficLightState.aggregate([.completed, .thinking]) == .thinking,
+        "thinking should outrank another source's completion"
+    )
+    expect(
+        TrafficLightState.aggregate([.executing, .error]) == .error,
+        "error should outrank another source's execution"
+    )
+    expect(
+        TrafficLightState.aggregate([.idle, .completed]) == .completed,
+        "completion should outrank idle"
+    )
+}
+
 private func parseClaudeLine(
     _ json: String,
     with parser: ClaudeSessionLineParser
@@ -554,6 +569,7 @@ testMonitorFiltersOriginatorAndTailsNewEvents()
 testMonitorBuffersPartialLinesAndRecoversAfterMalformedLine()
 testMonitorSortsFilesByTimestampAndRestartsAfterTruncation()
 testLampFramesMatchEveryTrafficLightState()
+testSourceStatesAggregateByPriority()
 testClaudeParserMapsPromptParallelToolsAndCompletion()
 testClaudeParserMapsOnlyTerminalErrorsToFailure()
 testClaudeParserIgnoresMetaAndSidechainRecords()

@@ -7,16 +7,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let state = AppState()
-        let panel = TrafficLightPanelController { [weak state] in
-            state?.acknowledgeError()
-        }
+        let panel = TrafficLightPanelController(
+            onAcknowledgeCodexError: { [weak state] in
+                state?.acknowledgeCodexError()
+            },
+            onAcknowledgeClaudeError: { [weak state] in
+                state?.acknowledgeClaudeError()
+            }
+        )
         let statusItem = StatusItemController { [weak panel] in
             panel?.toggle()
         }
 
-        state.onStateChanged = { [weak panel, weak statusItem] trafficLightState in
-            panel?.update(state: trafficLightState)
+        state.onStateChanged = { [weak statusItem] trafficLightState in
             statusItem?.update(state: trafficLightState)
+        }
+        state.onSourceStatesChanged = { [weak panel] codexState, claudeState in
+            panel?.update(codexState: codexState, claudeState: claudeState)
         }
         state.onMonitoringAvailabilityChanged = { [weak statusItem] available in
             statusItem?.updateMonitoringAvailability(available)

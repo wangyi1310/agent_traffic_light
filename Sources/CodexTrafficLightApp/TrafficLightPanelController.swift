@@ -5,27 +5,46 @@ final class TrafficLightPanelController: NSObject {
     var onVisibilityChanged: ((Bool) -> Void)?
 
     private let panel: NSPanel
-    private let trafficLightView: TrafficLightView
+    private let codexTrafficLightView: TrafficLightView
+    private let claudeTrafficLightView: TrafficLightView
     private let defaultsKey = "trafficLightPanelOrigin"
 
     var isVisible: Bool { panel.isVisible }
 
-    init(onAcknowledgeError: @escaping () -> Void) {
-        let size = NSSize(width: 39, height: 94)
+    init(
+        onAcknowledgeCodexError: @escaping () -> Void,
+        onAcknowledgeClaudeError: @escaping () -> Void
+    ) {
+        let groupSize = NSSize(width: 39, height: 94)
+        let gap: CGFloat = 4
+        let size = NSSize(width: groupSize.width * 2 + gap, height: groupSize.height)
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        trafficLightView = TrafficLightView(
-            frame: NSRect(origin: .zero, size: size),
-            orientation: .vertical
+        codexTrafficLightView = TrafficLightView(
+            frame: NSRect(origin: .zero, size: groupSize),
+            orientation: .vertical,
+            sourceLabel: "Codex"
+        )
+        claudeTrafficLightView = TrafficLightView(
+            frame: NSRect(
+                origin: NSPoint(x: groupSize.width + gap, y: 0),
+                size: groupSize
+            ),
+            orientation: .vertical,
+            sourceLabel: "Claude"
         )
         super.init()
 
-        trafficLightView.onAcknowledgeError = onAcknowledgeError
-        panel.contentView = trafficLightView
+        codexTrafficLightView.onAcknowledgeError = onAcknowledgeCodexError
+        claudeTrafficLightView.onAcknowledgeError = onAcknowledgeClaudeError
+        let contentView = NSView(frame: NSRect(origin: .zero, size: size))
+        contentView.addSubview(codexTrafficLightView)
+        contentView.addSubview(claudeTrafficLightView)
+        panel.contentView = contentView
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -48,8 +67,9 @@ final class TrafficLightPanelController: NSObject {
         NotificationCenter.default.removeObserver(self)
     }
 
-    func update(state: TrafficLightState) {
-        trafficLightView.state = state
+    func update(codexState: TrafficLightState, claudeState: TrafficLightState) {
+        codexTrafficLightView.state = codexState
+        claudeTrafficLightView.state = claudeState
     }
 
     func show() {
@@ -84,8 +104,16 @@ final class TrafficLightPanelController: NSObject {
         }
 
         var frame = NSRect(origin: origin, size: panel.frame.size)
-        if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }),
-           let screen = NSScreen.main {
+        if let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) }) {
+            frame.origin.x = min(
+                max(frame.origin.x, screen.visibleFrame.minX),
+                screen.visibleFrame.maxX - frame.width
+            )
+            frame.origin.y = min(
+                max(frame.origin.y, screen.visibleFrame.minY),
+                screen.visibleFrame.maxY - frame.height
+            )
+        } else if let screen = NSScreen.main {
             frame.origin = NSPoint(
                 x: screen.visibleFrame.maxX - frame.width - 24,
                 y: screen.visibleFrame.maxY - frame.height - 24

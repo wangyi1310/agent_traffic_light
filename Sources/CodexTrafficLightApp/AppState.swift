@@ -3,10 +3,19 @@ import Foundation
 
 final class AppState {
     private(set) var state: TrafficLightState = .idle
+    private(set) var codexState: TrafficLightState = .idle
+    private(set) var claudeState: TrafficLightState = .idle
     var onStateChanged: ((TrafficLightState) -> Void)?
+    var onSourceStatesChanged: ((TrafficLightState, TrafficLightState) -> Void)?
     var onMonitoringAvailabilityChanged: ((Bool) -> Void)?
 
-    private var reducer = SessionStateReducer()
+    private enum Source {
+        case codex
+        case claude
+    }
+
+    private var codexReducer = SessionStateReducer()
+    private var claudeReducer = SessionStateReducer()
     private let codexMonitor: SessionLogMonitor
     private let claudeMonitor: ClaudeSessionLogMonitor
     private var codexMonitorAvailable = false
@@ -34,12 +43,12 @@ final class AppState {
 
         codexMonitor.onEvents = { [weak self] events in
             DispatchQueue.main.async {
-                self?.receive(events, source: "codex")
+                self?.receive(events, source: .codex)
             }
         }
         claudeMonitor.onEvents = { [weak self] events in
             DispatchQueue.main.async {
-                self?.receive(events, source: "claude")
+                self?.receive(events, source: .claude)
             }
         }
         codexMonitor.onAvailabilityChanged = { [weak self] available in
@@ -64,26 +73,42 @@ final class AppState {
         claudeMonitor.stop()
     }
 
-    func acknowledgeError() {
-        reducer.acknowledgeError()
-        publishState()
+    func acknowledgeCodexError() {
+        codexReducer.acknowledgeError()
+        publishStates()
     }
 
-    private func publishState() {
-        let newState = reducer.state
-        guard newState != state else { return }
-        state = newState
-        onStateChanged?(newState)
+    func acknowledgeClaudeError() {
+        claudeReducer.acknowledgeError()
+        publishStates()
     }
 
-    private func receive(_ events: [MonitoredSessionEvent], source: String) {
+    private func receive(_ events: [MonitoredSessionEvent], source: Source) {
         for monitoredEvent in events {
-            reducer.apply(
-                monitoredEvent.event,
-                sessionID: "\(source):\(monitoredEvent.sessionID)"
-            )
+            switch source {
+            case .codex:
+                codexReducer.apply(monitoredEvent.event, sessionID: monitoredEvent.sessionID)
+            case .claude:
+                claudeReducer.apply(monitoredEvent.event, sessionID: monitoredEvent.sessionID)
+            }
         }
-        publishState()
+        publishStates()
+    }
+
+    private func publishStates() {
+        let newCodexState = codexReducer.state
+        let newClaudeState = claudeReducer.state
+        if newCodexState != codexState || newClaudeState != claudeState {
+            codexState = newCodexState
+            claudeState = newClaudeState
+            onSourceStatesChanged?(newCodexState, newClaudeState)
+        }
+
+        let newState = TrafficLightState.aggregate([newCodexState, newClaudeState])
+        if newState != state {
+            state = newState
+            onStateChanged?(newState)
+        }
     }
 
     private func updateAvailability(codex: Bool? = nil, claude: Bool? = nil) {

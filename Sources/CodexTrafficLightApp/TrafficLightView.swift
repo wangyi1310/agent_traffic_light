@@ -17,13 +17,20 @@ final class TrafficLightView: NSView {
     var onAcknowledgeError: (() -> Void)?
     let orientation: Orientation
 
+    private let sourceLabel: String?
     private var phase = 0
     private var animationTimer: Timer?
 
-    init(frame frameRect: NSRect = .zero, orientation: Orientation) {
+    init(
+        frame frameRect: NSRect = .zero,
+        orientation: Orientation,
+        sourceLabel: String? = nil
+    ) {
         self.orientation = orientation
+        self.sourceLabel = sourceLabel
         super.init(frame: frameRect)
         wantsLayer = true
+        toolTip = sourceLabel
     }
 
     @available(*, unavailable)
@@ -41,6 +48,7 @@ final class TrafficLightView: NSView {
         super.draw(dirtyRect)
         if orientation == .vertical {
             drawHousing()
+            drawSourceLabel()
         }
 
         let litLamps = TrafficLightAnimation.litLamps(for: state, phase: phase)
@@ -88,6 +96,20 @@ final class TrafficLightView: NSView {
         path.stroke()
     }
 
+    private func drawSourceLabel() {
+        guard let sourceLabel else { return }
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        sourceLabel.draw(
+            in: NSRect(x: 2, y: 1, width: bounds.width - 4, height: 10),
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 7, weight: .semibold),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.72),
+                .paragraphStyle: paragraphStyle,
+            ]
+        )
+    }
+
     private func drawLamp(_ lamp: TrafficLightLamp, in rect: NSRect, isLit: Bool) {
         let baseColor: NSColor
         switch lamp {
@@ -129,10 +151,12 @@ final class TrafficLightView: NSView {
             ]
         case .vertical:
             let gap: CGFloat = 5
-            let diameter = min(bounds.width - 12, (bounds.height - 16 - gap * 2) / 3)
+            let labelHeight: CGFloat = sourceLabel == nil ? 0 : 11
+            let availableHeight = bounds.height - labelHeight
+            let diameter = min(bounds.width - 12, (availableHeight - 5 - gap * 2) / 3)
             let x = (bounds.width - diameter) / 2
             let totalHeight = diameter * 3 + gap * 2
-            let startY = (bounds.height - totalHeight) / 2
+            let startY = labelHeight + (availableHeight - totalHeight) / 2
             return [
                 .red: NSRect(x: x, y: startY, width: diameter, height: diameter),
                 .yellow: NSRect(x: x, y: startY + diameter + gap, width: diameter, height: diameter),

@@ -4,6 +4,15 @@ public enum TrafficLightState: Equatable, Sendable {
     case executing
     case completed
     case error
+
+    public static func aggregate(_ states: [TrafficLightState]) -> TrafficLightState {
+        for state in [TrafficLightState.error, .executing, .thinking, .completed] {
+            if states.contains(state) {
+                return state
+            }
+        }
+        return .idle
+    }
 }
 
 public enum SessionEvent: Equatable, Sendable {
