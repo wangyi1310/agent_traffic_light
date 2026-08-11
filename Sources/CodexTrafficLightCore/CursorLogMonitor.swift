@@ -9,7 +9,9 @@ public final class CursorLogMonitor {
         var incompleteLine = Data()
         var currentSessionID: String?
         var currentTurnID: String?
+        var lastActivityDate: Date?
         var outstandingCalls: Set<String> = []
+        var isInactive = false
     }
 
     private struct LocatedEvent {
@@ -21,6 +23,7 @@ public final class CursorLogMonitor {
     private let rootURL: URL
     private let stateReader: CursorComposerStateReader?
     private let pollInterval: TimeInterval
+    private let inactivityTimeout: TimeInterval
     private let parser = CursorLogLineParser()
     private let queue = DispatchQueue(label: "local.codex.traffic-light.cursor-log-monitor")
     private var timer: DispatchSourceTimer?
@@ -31,23 +34,29 @@ public final class CursorLogMonitor {
     public init(
         rootURL: URL,
         stateDatabaseURL: URL? = nil,
-        pollInterval: TimeInterval = 1.0
+        pollInterval: TimeInterval = 1.0,
+        inactivityTimeout: TimeInterval = 10 * 60
     ) {
         self.rootURL = rootURL.standardizedFileURL
         stateReader = stateDatabaseURL.map(CursorComposerStateReader.init)
         self.pollInterval = pollInterval
+        self.inactivityTimeout = inactivityTimeout
     }
 
     public func poll(now: Date = Date()) throws -> [MonitoredSessionEvent] {
         let urls = try discoverLogFiles(now: now)
         let currentPaths = Set(urls.map(\.path))
-        cursors = cursors.filter { currentPaths.contains($0.key) }
+        cursors = cursors.filter { path, cursor in
+            currentPaths.contains(path)
+                || (cursor.currentTurnID != nil && !cursor.isInactive)
+        }
 
         var locatedEvents: [LocatedEvent] = []
         for url in urls.sorted(by: { $0.path < $1.path }) {
-            locatedEvents.append(contentsOf: try readNewEvents(from: url))
+            locatedEvents.append(contentsOf: try readNewEvents(from: url, now: now))
         }
         locatedEvents.append(contentsOf: readQuestionStateEvents(now: now))
+        locatedEvents.append(contentsOf: expireInactiveTurns(now: now))
         return locatedEvents.sorted {
             if $0.event.timestamp != $1.event.timestamp {
                 return $0.event.timestamp < $1.event.timestamp
@@ -80,6 +89,11 @@ public final class CursorLogMonitor {
                     )
                 }
                 activeQuestionCalls[sessionID] = pendingCallID
+                refreshActivity(
+                    sessionID: sessionID,
+                    now: now,
+                    events: &events
+                )
                 append(
                     .toolStarted(callID: pendingCallID),
                     timestamp: timestamp,
@@ -89,6 +103,11 @@ public final class CursorLogMonitor {
                 )
             } else if pendingCallID == nil, let activeCallID {
                 activeQuestionCalls.removeValue(forKey: sessionID)
+                refreshActivity(
+                    sessionID: sessionID,
+                    now: now,
+                    events: &events
+                )
                 append(
                     .toolFinished(callID: activeCallID),
                     timestamp: timestamp,
@@ -97,6 +116,62 @@ public final class CursorLogMonitor {
                     to: &events
                 )
             }
+        }
+        return events
+    }
+
+    private func refreshActivity(
+        sessionID: String,
+        now: Date,
+        events: inout [LocatedEvent]
+    ) {
+        for path in cursors.keys.sorted() {
+            guard
+                var cursor = cursors[path],
+                cursor.currentSessionID == sessionID
+            else {
+                continue
+            }
+            cursor.lastActivityDate = now
+            if cursor.isInactive, let turnID = cursor.currentTurnID {
+                cursor.isInactive = false
+                append(
+                    .taskStarted(turnID: turnID),
+                    timestamp: Self.timestampFormatter.string(from: now),
+                    sessionID: sessionID,
+                    path: "cursor-state",
+                    to: &events
+                )
+            }
+            cursors[path] = cursor
+        }
+    }
+
+    private func expireInactiveTurns(now: Date) -> [LocatedEvent] {
+        var events: [LocatedEvent] = []
+        for path in cursors.keys.sorted() {
+            guard var cursor = cursors[path] else { continue }
+            guard
+                let sessionID = cursor.currentSessionID,
+                let turnID = cursor.currentTurnID,
+                !cursor.isInactive,
+                cursor.outstandingCalls.isEmpty,
+                activeQuestionCalls[sessionID] == nil,
+                let lastActivityDate = cursor.lastActivityDate,
+                now.timeIntervalSince(lastActivityDate) >= inactivityTimeout
+            else {
+                continue
+            }
+
+            cursor.isInactive = true
+            cursors[path] = cursor
+            append(
+                .taskAborted(turnID: turnID, reason: "inactive"),
+                timestamp: Self.timestampFormatter.string(from: now),
+                sessionID: sessionID,
+                path: path,
+                to: &events
+            )
         }
         return events
     }
@@ -184,7 +259,7 @@ public final class CursorLogMonitor {
         return files
     }
 
-    private func readNewEvents(from url: URL) throws -> [LocatedEvent] {
+    private func readNewEvents(from url: URL, now: Date) throws -> [LocatedEvent] {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         var cursor = cursors[url.path] ?? FileCursor()
@@ -210,7 +285,13 @@ public final class CursorLogMonitor {
             var line = combined.subdata(in: lineStart..<index)
             if line.last == 0x0D { line.removeLast() }
             if !line.isEmpty {
-                parse(line, path: url.path, cursor: &cursor, events: &events)
+                parse(
+                    line,
+                    path: url.path,
+                    now: now,
+                    cursor: &cursor,
+                    events: &events
+                )
             }
             lineStart = combined.index(after: index)
         }
@@ -222,14 +303,33 @@ public final class CursorLogMonitor {
     private func parse(
         _ line: Data,
         path: String,
+        now: Date,
         cursor: inout FileCursor,
         events: inout [LocatedEvent]
     ) {
         guard let parsed = try? parser.parse(line) else { return }
+        cursor.lastActivityDate = Self.timestampFormatter.date(from: parsed.timestamp) ?? now
         if let sessionID = parsed.sessionID {
             cursor.currentSessionID = sessionID
         }
         guard let sessionID = parsed.sessionID ?? cursor.currentSessionID else { return }
+
+        let startsNewTurn: Bool
+        if case .taskStarted = parsed.signal {
+            startsNewTurn = true
+        } else {
+            startsNewTurn = false
+        }
+        if cursor.isInactive, !startsNewTurn, let turnID = cursor.currentTurnID {
+            cursor.isInactive = false
+            append(
+                .taskStarted(turnID: turnID),
+                timestamp: parsed.timestamp,
+                sessionID: sessionID,
+                path: path,
+                to: &events
+            )
+        }
 
         switch parsed.signal {
         case let .taskStarted(turnID):
@@ -241,6 +341,7 @@ public final class CursorLogMonitor {
                 events: &events
             )
             cursor.currentTurnID = turnID
+            cursor.isInactive = false
             append(
                 .taskStarted(turnID: turnID),
                 timestamp: parsed.timestamp,
@@ -277,6 +378,7 @@ public final class CursorLogMonitor {
                 events: &events
             )
             cursor.currentTurnID = nil
+            cursor.isInactive = false
             append(.taskCompleted(turnID: turnID), timestamp: parsed.timestamp, sessionID: sessionID, path: path, to: &events)
         case let .aborted(turnID, reason):
             finishOutstandingCalls(
@@ -287,6 +389,7 @@ public final class CursorLogMonitor {
                 events: &events
             )
             cursor.currentTurnID = nil
+            cursor.isInactive = false
             append(.taskAborted(turnID: turnID, reason: reason), timestamp: parsed.timestamp, sessionID: sessionID, path: path, to: &events)
         case let .failed(turnID):
             finishOutstandingCalls(
@@ -297,6 +400,7 @@ public final class CursorLogMonitor {
                 events: &events
             )
             cursor.currentTurnID = nil
+            cursor.isInactive = false
             append(.taskFailed(turnID: turnID), timestamp: parsed.timestamp, sessionID: sessionID, path: path, to: &events)
         }
     }

@@ -761,6 +761,13 @@ private func cursorLogLine(
     "\(timestamp) [info] {\"level\":\"info\",\"key\":\"\(key)\",\"message\":\"\(message)\",\"metadata\":{\(metadata)}}"
 }
 
+private func cursorTimestamp(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+    return formatter.string(from: date)
+}
+
 private func testCursorParserMapsTurnToolAndOutcomes() {
     let parser = CursorLogLineParser()
     let start = cursorLogLine(
@@ -943,9 +950,11 @@ private func testCursorMonitorMapsQuestionWaitAndResume() {
         let window = root.appendingPathComponent("window1", isDirectory: true)
         try FileManager.default.createDirectory(at: window, withIntermediateDirectories: true)
         let log = window.appendingPathComponent("Cursor Structured Logs.log")
+        let startedAt = Date()
         let start = cursorLogLine(
             "Chat submission started",
-            metadata: #""composerId":"cursor-question","requestId":"turn-1""#
+            metadata: #""composerId":"cursor-question","requestId":"turn-1""#,
+            timestamp: cursorTimestamp(startedAt)
         )
         try (start + "\n").write(to: log, atomically: true, encoding: .utf8)
 
@@ -959,15 +968,21 @@ private func testCursorMonitorMapsQuestionWaitAndResume() {
 
         let monitor = CursorLogMonitor(
             rootURL: root,
-            stateDatabaseURL: database
+            stateDatabaseURL: database,
+            inactivityTimeout: 1
         )
-        let waitingEvents = try monitor.poll()
+        let waitingEvents = try monitor.poll(now: startedAt)
         expect(
             waitingEvents.map(\.event) == [
                 .taskStarted(turnID: "turn-1"),
                 .toolStarted(callID: "question-1"),
             ],
             "Cursor question should enter the yellow waiting state"
+        )
+        let stillWaiting = try monitor.poll(now: startedAt.addingTimeInterval(10))
+        expect(
+            stillWaiting.isEmpty,
+            "pending Cursor question should prevent inactivity expiration"
         )
 
         let resumed = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":{"capabilityType":30}}]}"#
@@ -976,10 +991,129 @@ private func testCursorMonitorMapsQuestionWaitAndResume() {
             sessionID: "cursor-question",
             json: resumed
         )
-        let resumedEvents = try monitor.poll()
+        let resumedEvents = try monitor.poll(now: startedAt.addingTimeInterval(10))
         expect(
             resumedEvents.map(\.event) == [.toolFinished(callID: "question-1")],
             "Cursor should leave yellow waiting after the user continues"
+        )
+    }
+}
+
+private func testCursorMonitorExpiresTurnWithoutTerminalEvent() {
+    withTemporaryDirectory { root in
+        let log = root.appendingPathComponent("Cursor Structured Logs.log")
+        let startedAt = Date()
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-stale","requestId":"turn-stale""#,
+            timestamp: cursorTimestamp(startedAt)
+        )
+        try (start + "\n").write(to: log, atomically: true, encoding: .utf8)
+
+        let monitor = CursorLogMonitor(
+            rootURL: root,
+            inactivityTimeout: 60
+        )
+        let initial = try monitor.poll(now: startedAt)
+        expect(
+            initial.map(\.event) == [.taskStarted(turnID: "turn-stale")],
+            "Cursor start without a terminal event should begin thinking"
+        )
+
+        let beforeTimeout = try monitor.poll(now: startedAt.addingTimeInterval(59))
+        expect(beforeTimeout.isEmpty, "Cursor turn should remain active before timeout")
+
+        let expired = try monitor.poll(now: startedAt.addingTimeInterval(61))
+        expect(
+            expired.map(\.event) == [
+                .taskAborted(turnID: "turn-stale", reason: "inactive"),
+            ],
+            "Cursor turn without a terminal event should expire to idle"
+        )
+
+        let resumedAt = startedAt.addingTimeInterval(62)
+        let reasoning = cursorLogLine(
+            "Starting stream request",
+            metadata: #""composerId":"cursor-stale","requestId":"turn-stale""#,
+            timestamp: cursorTimestamp(resumedAt)
+        )
+        try append(reasoning + "\n", to: log)
+        let resumed = try monitor.poll(now: resumedAt)
+        expect(
+            resumed.map(\.event) == [
+                .taskStarted(turnID: "turn-stale"),
+                .reasoning,
+            ],
+            "new Cursor activity should restore an inactive turn"
+        )
+    }
+}
+
+private func testCursorMonitorDoesNotExpireOutstandingTool() {
+    withTemporaryDirectory { root in
+        let log = root.appendingPathComponent("Cursor Structured Logs.log")
+        let startedAt = Date()
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-tool","requestId":"turn-tool""#,
+            timestamp: cursorTimestamp(startedAt)
+        )
+        let tool = cursorLogLine(
+            "Shell stream: approval gate reached",
+            key: "agent_exec",
+            metadata: #""toolCallId":"tool-pending""#,
+            timestamp: cursorTimestamp(startedAt)
+        )
+        try (start + "\n" + tool + "\n").write(
+            to: log,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let monitor = CursorLogMonitor(rootURL: root, inactivityTimeout: 1)
+        _ = try monitor.poll(now: startedAt)
+        let events = try monitor.poll(now: startedAt.addingTimeInterval(10))
+        expect(
+            events.isEmpty,
+            "outstanding Cursor tool should prevent inactivity expiration"
+        )
+    }
+}
+
+private func testCursorMonitorExpiresTurnAfterLogLeavesScanRange() {
+    withTemporaryDirectory { root in
+        let log = root.appendingPathComponent("Cursor Structured Logs.log")
+        let startedAt = Date()
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-rotated","requestId":"turn-rotated""#,
+            timestamp: cursorTimestamp(startedAt)
+        )
+        try (start + "\n").write(to: log, atomically: true, encoding: .utf8)
+
+        let monitor = CursorLogMonitor(
+            rootURL: root,
+            inactivityTimeout: 60
+        )
+        _ = try monitor.poll(now: startedAt)
+
+        let staleModificationDate = startedAt.addingTimeInterval(-3 * 24 * 60 * 60)
+        try FileManager.default.setAttributes(
+            [.modificationDate: staleModificationDate],
+            ofItemAtPath: log.path
+        )
+        let expired = try monitor.poll(now: startedAt.addingTimeInterval(61))
+        expect(
+            expired.map(\.event) == [
+                .taskAborted(turnID: "turn-rotated", reason: "inactive"),
+            ],
+            "Cursor turn should expire after its log leaves the scan range: \(expired)"
+        )
+
+        let repeated = try monitor.poll(now: startedAt.addingTimeInterval(62))
+        expect(
+            repeated.isEmpty,
+            "removed Cursor logs should not repeat inactivity events: \(repeated)"
         )
     }
 }
@@ -1016,6 +1150,9 @@ testCursorParserIgnoresUnrelatedStructuredLogs()
 testCursorMonitorTracksExecutionCompletionAndTailing()
 testCursorComposerStateParserFindsPendingQuestion()
 testCursorMonitorMapsQuestionWaitAndResume()
+testCursorMonitorExpiresTurnWithoutTerminalEvent()
+testCursorMonitorDoesNotExpireOutstandingTool()
+testCursorMonitorExpiresTurnAfterLogLeavesScanRange()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)
