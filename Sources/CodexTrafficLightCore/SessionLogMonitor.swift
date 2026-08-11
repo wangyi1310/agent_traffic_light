@@ -41,8 +41,8 @@ public final class SessionLogMonitor {
         self.pollInterval = pollInterval
     }
 
-    public func poll() throws -> [MonitoredSessionEvent] {
-        let urls = try discoverSessionFiles()
+    public func poll(now: Date = Date()) throws -> [MonitoredSessionEvent] {
+        let urls = try discoverSessionFiles(now: now)
         let currentPaths = Set(urls.map(\.path))
         cursors = cursors.filter { currentPaths.contains($0.key) }
 
@@ -97,7 +97,7 @@ public final class SessionLogMonitor {
         onAvailabilityChanged?(available)
     }
 
-    private func discoverSessionFiles() throws -> [URL] {
+    private func discoverSessionFiles(now: Date) throws -> [URL] {
         var isDirectory: ObjCBool = false
         guard
             FileManager.default.fileExists(atPath: rootURL.path, isDirectory: &isDirectory),
@@ -109,50 +109,31 @@ public final class SessionLogMonitor {
             throw CocoaError(.fileReadNoPermission)
         }
 
-        let datedDirectories = recentDatedDirectories().filter {
-            var directoryFlag: ObjCBool = false
-            return FileManager.default.fileExists(atPath: $0.path, isDirectory: &directoryFlag)
-                && directoryFlag.boolValue
-        }
-        let searchRoots = datedDirectories.isEmpty ? [rootURL] : datedDirectories
-
+        let calendar = Calendar.current
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        let cutoff = calendar.startOfDay(for: yesterday)
         var files: [URL] = []
-        let keys: [URLResourceKey] = [.isRegularFileKey]
-        for searchRoot in searchRoots {
-            guard let enumerator = FileManager.default.enumerator(
-                at: searchRoot,
-                includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles]
-            ) else {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentModificationDateKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let values = try url.resourceValues(forKeys: keys)
+            guard
+                values.isRegularFile == true,
+                let modificationDate = values.contentModificationDate,
+                modificationDate >= cutoff
+            else {
                 continue
             }
-            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-                let values = try url.resourceValues(forKeys: Set(keys))
-                if values.isRegularFile == true {
-                    files.append(url.standardizedFileURL)
-                }
-            }
+            files.append(url.standardizedFileURL)
         }
         return files
-    }
-
-    private func recentDatedDirectories(now: Date = Date()) -> [URL] {
-        let calendar = Calendar.current
-        return [now, calendar.date(byAdding: .day, value: -1, to: now)].compactMap { date in
-            guard let date else { return nil }
-            let components = calendar.dateComponents([.year, .month, .day], from: date)
-            guard
-                let year = components.year,
-                let month = components.month,
-                let day = components.day
-            else {
-                return nil
-            }
-            return rootURL
-                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
-        }
     }
 
     private func readNewEvents(from url: URL) throws -> [LocatedEvent] {

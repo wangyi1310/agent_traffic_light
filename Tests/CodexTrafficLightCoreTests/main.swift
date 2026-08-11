@@ -306,6 +306,39 @@ private func testMonitorSortsFilesByTimestampAndRestartsAfterTruncation() {
     }
 }
 
+private func testMonitorIgnoresStaleFilesUntilTheyBecomeActiveAgain() {
+    withTemporaryDirectory { root in
+        let file = root.appendingPathComponent("stale.jsonl")
+        let session = #"{"timestamp":"00","type":"session_meta","payload":{"id":"stale","originator":"Codex Desktop"}}"# + "\n" +
+            #"{"timestamp":"01","type":"event_msg","payload":{"type":"task_started","turn_id":"old-turn"}}"# + "\n"
+        try session.write(to: file, atomically: true, encoding: .utf8)
+
+        let now = Date()
+        let staleDate = Calendar.current.date(byAdding: .day, value: -3, to: now) ?? now
+        try FileManager.default.setAttributes(
+            [.modificationDate: staleDate],
+            ofItemAtPath: file.path
+        )
+
+        let monitor = SessionLogMonitor(rootURL: root)
+        let staleResult = try monitor.poll(now: now)
+        expect(
+            staleResult.isEmpty,
+            "stale Codex session files should not reactivate historical turns"
+        )
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: now],
+            ofItemAtPath: file.path
+        )
+        let activeResult = try monitor.poll(now: now)
+        expect(
+            activeResult.map(\.event) == [.taskStarted(turnID: "old-turn")],
+            "a stale session should be discovered again after new activity"
+        )
+    }
+}
+
 private func testLampFramesMatchEveryTrafficLightState() {
     expect(
         TrafficLightAnimation.litLamps(for: .thinking, phase: 0) == [.red],
@@ -720,6 +753,7 @@ testParserIgnoresUnknownRecordsAndRejectsMalformedJSON()
 testMonitorFiltersOriginatorAndTailsNewEvents()
 testMonitorBuffersPartialLinesAndRecoversAfterMalformedLine()
 testMonitorSortsFilesByTimestampAndRestartsAfterTruncation()
+testMonitorIgnoresStaleFilesUntilTheyBecomeActiveAgain()
 testLampFramesMatchEveryTrafficLightState()
 testSourceStatesAggregateByPriority()
 testClaudeParserMapsPromptParallelToolsAndCompletion()
