@@ -306,6 +306,33 @@ private func testMonitorSortsFilesByTimestampAndRestartsAfterTruncation() {
     }
 }
 
+private func testMonitorKeepsTurnSessionAcrossMetadataChanges() {
+    withTemporaryDirectory { root in
+        let file = root.appendingPathComponent("forked-session.jsonl")
+        let contents = #"{"timestamp":"00","type":"session_meta","payload":{"id":"original","originator":"Codex Desktop"}}"# + "\n" +
+            #"{"timestamp":"01","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"# + "\n" +
+            #"{"timestamp":"02","type":"session_meta","payload":{"id":"host","originator":"Codex Desktop"}}"# + "\n" +
+            #"{"timestamp":"03","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}"# + "\n"
+        try contents.write(to: file, atomically: true, encoding: .utf8)
+
+        let monitor = SessionLogMonitor(rootURL: root)
+        let events = try monitor.poll()
+        expect(
+            events.map(\.sessionID) == ["original", "original"],
+            "a terminal event should keep the session that started its turn"
+        )
+
+        var reducer = SessionStateReducer()
+        for event in events {
+            reducer.apply(event.event, sessionID: event.sessionID)
+        }
+        expect(
+            reducer.state == .completed,
+            "metadata changes should not leave the original turn active"
+        )
+    }
+}
+
 private func testMonitorIgnoresStaleFilesUntilTheyBecomeActiveAgain() {
     withTemporaryDirectory { root in
         let file = root.appendingPathComponent("stale.jsonl")
@@ -753,6 +780,7 @@ testParserIgnoresUnknownRecordsAndRejectsMalformedJSON()
 testMonitorFiltersOriginatorAndTailsNewEvents()
 testMonitorBuffersPartialLinesAndRecoversAfterMalformedLine()
 testMonitorSortsFilesByTimestampAndRestartsAfterTruncation()
+testMonitorKeepsTurnSessionAcrossMetadataChanges()
 testMonitorIgnoresStaleFilesUntilTheyBecomeActiveAgain()
 testLampFramesMatchEveryTrafficLightState()
 testSourceStatesAggregateByPriority()
