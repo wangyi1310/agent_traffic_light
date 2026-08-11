@@ -7,17 +7,19 @@ final class TrafficLightPanelController: NSObject {
     private let panel: NSPanel
     private let codexTrafficLightView: TrafficLightView
     private let claudeTrafficLightView: TrafficLightView
+    private let cursorTrafficLightView: TrafficLightView
     private let defaultsKey = "trafficLightPanelOrigin"
 
     var isVisible: Bool { panel.isVisible }
 
     init(
         onAcknowledgeCodexError: @escaping () -> Void,
-        onAcknowledgeClaudeError: @escaping () -> Void
+        onAcknowledgeClaudeError: @escaping () -> Void,
+        onAcknowledgeCursorError: @escaping () -> Void
     ) {
         let groupSize = NSSize(width: 39, height: 94)
         let gap: CGFloat = 4
-        let size = NSSize(width: groupSize.width * 2 + gap, height: groupSize.height)
+        let size = NSSize(width: groupSize.width * 3 + gap * 2, height: groupSize.height)
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -37,13 +39,23 @@ final class TrafficLightPanelController: NSObject {
             orientation: .vertical,
             sourceLabel: "Claude"
         )
+        cursorTrafficLightView = TrafficLightView(
+            frame: NSRect(
+                origin: NSPoint(x: (groupSize.width + gap) * 2, y: 0),
+                size: groupSize
+            ),
+            orientation: .vertical,
+            sourceLabel: "Cursor"
+        )
         super.init()
 
         codexTrafficLightView.onAcknowledgeError = onAcknowledgeCodexError
         claudeTrafficLightView.onAcknowledgeError = onAcknowledgeClaudeError
+        cursorTrafficLightView.onAcknowledgeError = onAcknowledgeCursorError
         let contentView = NSView(frame: NSRect(origin: .zero, size: size))
         contentView.addSubview(codexTrafficLightView)
         contentView.addSubview(claudeTrafficLightView)
+        contentView.addSubview(cursorTrafficLightView)
         panel.contentView = contentView
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -67,9 +79,14 @@ final class TrafficLightPanelController: NSObject {
         NotificationCenter.default.removeObserver(self)
     }
 
-    func update(codexState: TrafficLightState, claudeState: TrafficLightState) {
+    func update(
+        codexState: TrafficLightState,
+        claudeState: TrafficLightState,
+        cursorState: TrafficLightState
+    ) {
         codexTrafficLightView.state = codexState
         claudeTrafficLightView.state = claudeState
+        cursorTrafficLightView.state = cursorState
     }
 
     func show() {

@@ -1,13 +1,13 @@
 # Codex Traffic Light
 
-一个监控 Codex Desktop 和 Claude Code 运行状态的原生 macOS 桌面应用。它提供菜单栏图标，以及可拖动、始终置顶的双组交通灯悬浮窗。
+一个监控 Codex Desktop、Claude Code 和 Cursor Agent 运行状态的原生 macOS 桌面应用。它提供菜单栏图标，以及可拖动、始终置顶的三组交通灯悬浮窗。
 
 项目使用 Swift、Swift Package Manager 和 AppKit 实现，不包含第三方依赖、网络请求、遥测或自动更新服务。
 
 ## 功能
 
-- 分别显示 Codex Desktop 和 Claude Code 的状态。
-- 菜单栏显示两者的汇总状态。
+- 分别显示 Codex Desktop、Claude Code 和 Cursor Agent 的状态。
+- 菜单栏显示三者的汇总状态。
 - 悬浮窗可移动、隐藏，并自动记住位置。
 - 支持思考、工具执行、命令审批、完成、错误和空闲状态。
 - 只读监控本机已有会话文件，不修改或控制 Codex、Claude Code。
@@ -22,7 +22,7 @@
 | 任务出错 | 红灯闪烁，直到下一个任务开始或点击红灯确认 |
 | 空闲或主动取消 | 三灯熄灭 |
 
-Codex Desktop 和 Claude Code 有多个任务并发时，菜单栏按 `出错 > 执行 > 思考 > 完成 > 空闲` 汇总。
+多个来源或任务并发时，菜单栏按 `出错 > 执行 > 思考 > 完成 > 空闲` 汇总。
 
 Claude Code 处于思考状态且连续 10 分钟没有新的状态日志时，会自动回到空闲；正在执行的工具调用不受此超时影响。
 
@@ -49,7 +49,7 @@ open "build/Codex Traffic Light.app"
 ## 使用
 
 - 应用启动后默认显示悬浮交通灯，并在菜单栏常驻。
-- 悬浮窗左侧显示 Codex，右侧显示 Claude。
+- 悬浮窗从左到右显示 Codex、Claude 和 Cursor。
 - 拖动灯罩可移动悬浮窗，位置会自动保存。
 - 菜单栏菜单可显示或隐藏悬浮窗，也可退出应用。
 - 红灯闪烁时点击对应灯组的红灯，可单独确认该来源的错误并熄灭。
@@ -67,10 +67,12 @@ open "build/Codex Traffic Light.app"
 | Codex Desktop | `~/.codex/sessions` | 读取最近有更新的 Codex Desktop 会话状态事件 |
 | Claude Code | `~/.claude/projects` | 读取最近有更新的主会话状态，排除 `subagents` |
 | Claude Code runtime | `~/.claude/sessions` | 判断进程是否忙碌或正在等待命令审批 |
+| Cursor Agent | `~/Library/Application Support/Cursor/logs` | 读取 Cursor Agent 的结构化生命周期和命令执行事件 |
+| Cursor state | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | 判断 Cursor Agent 是否正在等待问题回答 |
 
-Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话。Codex 和 Claude 主会话日志都只处理从昨天零点以来有修改的 JSONL 文件，避免扫描无关的历史会话。
+Codex 只接受 `session_meta.payload.originator == "Codex Desktop"` 的会话。Codex、Claude 和 Cursor 日志都只处理从昨天零点以来有修改的文件，避免扫描无关的历史会话。
 
-会话文件每一行是完整 JSON，可能包含提示词、回复、推理、工具输入或工具输出。Foundation 会在进程内短暂反序列化当前行，但这些内容字段不会进入状态模型，也不会被应用显示、打印、写入磁盘或发送到网络。状态模型只保留时间戳、会话/任务/调用标识和状态字段。
+会话日志记录可能包含提示词、回复、推理、工具输入或工具输出。Foundation 会在进程内短暂反序列化当前记录，但这些内容字段不会进入状态模型，也不会被应用显示、打印、写入磁盘或发送到网络。状态模型只保留时间戳、会话/任务/调用标识和状态字段。
 
 ### 本地持久化
 
@@ -105,6 +107,8 @@ plutil -lint "build/Codex Traffic Light.app/Contents/Info.plist"
 - `CODEX_TRAFFIC_LIGHT_SESSION_ROOT`
 - `CLAUDE_CODE_SESSION_ROOT`
 - `CLAUDE_CODE_RUNTIME_SESSION_ROOT`
+- `CURSOR_TRAFFIC_LIGHT_LOG_ROOT`
+- `CURSOR_TRAFFIC_LIGHT_STATE_DATABASE`
 
 这些变量不是界面设置。公开问题或日志时，请勿上传真实会话文件；测试用例应使用匿名、合成数据。
 

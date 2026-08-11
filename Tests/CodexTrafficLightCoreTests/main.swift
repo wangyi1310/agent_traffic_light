@@ -1,5 +1,6 @@
 import CodexTrafficLightCore
 import Foundation
+import SQLite3
 
 private var failureCount = 0
 
@@ -739,6 +740,250 @@ private func testClaudeRuntimeBusyRestoresInactiveTurn() {
     }
 }
 
+private func parseCursorLine(
+    _ line: String,
+    with parser: CursorLogLineParser
+) -> ParsedCursorLogLine? {
+    do {
+        return try parser.parse(Data(line.utf8))
+    } catch {
+        expect(false, "valid Cursor log JSON should parse: \(error)")
+        return nil
+    }
+}
+
+private func cursorLogLine(
+    _ message: String,
+    key: String = "composer",
+    metadata: String,
+    timestamp: String = "2026-08-11 10:00:00.000"
+) -> String {
+    "\(timestamp) [info] {\"level\":\"info\",\"key\":\"\(key)\",\"message\":\"\(message)\",\"metadata\":{\(metadata)}}"
+}
+
+private func testCursorParserMapsTurnToolAndOutcomes() {
+    let parser = CursorLogLineParser()
+    let start = cursorLogLine(
+        "agent.turn.start",
+        metadata: #""conversation_id":"cursor-1","request_id":"turn-1""#
+    )
+    let tool = cursorLogLine(
+        "Shell stream: approval gate reached",
+        key: "agent_exec",
+        metadata: #""toolCallId":"tool-1","commandLength":"12""#
+    )
+    let reasoning = cursorLogLine(
+        "Starting stream request",
+        metadata: #""composerId":"cursor-1","requestId":"turn-1""#
+    )
+    let success = cursorLogLine(
+        "agent.turn.outcome",
+        metadata: #""conversation_id":"cursor-1","request_id":"turn-1","outcome":"success""#
+    )
+    let cancelled = cursorLogLine(
+        "agent.turn.outcome",
+        metadata: #""conversation_id":"cursor-1","request_id":"turn-2","outcome":"cancelled""#
+    )
+    let failed = cursorLogLine(
+        "agent.turn.outcome",
+        metadata: #""conversation_id":"cursor-1","request_id":"turn-3","outcome":"error""#
+    )
+
+    expect(
+        parseCursorLine(start, with: parser) == ParsedCursorLogLine(
+            timestamp: "2026-08-11 10:00:00.000",
+            sessionID: "cursor-1",
+            signal: .taskStarted(turnID: "turn-1")
+        ),
+        "Cursor turn start should map to thinking"
+    )
+    expect(
+        parseCursorLine(tool, with: parser)?.signal == .toolStarted(callID: "tool-1"),
+        "Cursor shell approval should start tool execution"
+    )
+    expect(
+        parseCursorLine(reasoning, with: parser)?.signal == .reasoning,
+        "Cursor stream restart should return to reasoning"
+    )
+    expect(
+        parseCursorLine(success, with: parser)?.signal == .completed(turnID: "turn-1"),
+        "Cursor success outcome should complete"
+    )
+    expect(
+        parseCursorLine(cancelled, with: parser)?.signal
+            == .aborted(turnID: "turn-2", reason: "interrupted"),
+        "Cursor cancellation should become an interruption"
+    )
+    expect(
+        parseCursorLine(failed, with: parser)?.signal == .failed(turnID: "turn-3"),
+        "Cursor non-success outcome should fail"
+    )
+}
+
+private func testCursorParserIgnoresUnrelatedStructuredLogs() {
+    let parser = CursorLogLineParser()
+    let unrelated = cursorLogLine(
+        "Composer state loaded",
+        metadata: #""composerId":"cursor-1""#
+    )
+    expect(
+        parseCursorLine(unrelated, with: parser) == nil,
+        "unrelated Cursor logs should not affect state"
+    )
+    let routineStreamCleanup = cursorLogLine(
+        "Aborted current chat",
+        metadata: #""composerId":"cursor-1","requestId":"turn-1""#
+    )
+    expect(
+        parseCursorLine(routineStreamCleanup, with: parser) == nil,
+        "Cursor stream cleanup should wait for the authoritative turn outcome"
+    )
+    expect(
+        parseCursorLine("not structured JSON", with: parser) == nil,
+        "plain Cursor logs should be ignored"
+    )
+}
+
+private func testCursorMonitorTracksExecutionCompletionAndTailing() {
+    withTemporaryDirectory { root in
+        let window = root.appendingPathComponent("window1/exthost/anysphere.cursor-always-local")
+        try FileManager.default.createDirectory(at: window, withIntermediateDirectories: true)
+        let log = window.appendingPathComponent("Cursor Structured Logs.log")
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-1","requestId":"turn-1""#,
+            timestamp: "2026-08-11 10:00:00.000"
+        )
+        let tool = cursorLogLine(
+            "Shell stream: approval gate reached",
+            key: "agent_exec",
+            metadata: #""toolCallId":"tool-1""#,
+            timestamp: "2026-08-11 10:00:01.000"
+        )
+        try (start + "\n" + tool + "\n").write(
+            to: log,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let monitor = CursorLogMonitor(rootURL: root)
+        let first = try monitor.poll()
+        expect(
+            first.map(\.event) == [
+                .taskStarted(turnID: "turn-1"),
+                .toolStarted(callID: "tool-1"),
+            ],
+            "Cursor monitor should enter execution for the active window"
+        )
+
+        let reasoning = cursorLogLine(
+            "Starting stream request",
+            metadata: #""composerId":"cursor-1","requestId":"turn-1""#,
+            timestamp: "2026-08-11 10:00:02.000"
+        )
+        let completed = cursorLogLine(
+            "agent.turn.outcome",
+            metadata: #""conversation_id":"cursor-1","request_id":"turn-1","outcome":"success""#,
+            timestamp: "2026-08-11 10:00:03.000"
+        )
+        try append(reasoning + "\n" + completed + "\n", to: log)
+
+        let second = try monitor.poll()
+        expect(
+            second.map(\.event) == [
+                .toolFinished(callID: "tool-1"),
+                .reasoning,
+                .taskCompleted(turnID: "turn-1"),
+            ],
+            "Cursor stream continuation should finish the tool and then complete"
+        )
+        let third = try monitor.poll()
+        expect(third.isEmpty, "unchanged Cursor logs should not repeat events")
+    }
+}
+
+private func testCursorComposerStateParserFindsPendingQuestion() {
+    let parser = CursorComposerStateParser()
+    let waiting = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":30}},{"grouping":{"capabilityType":15,"toolFormerTool":51,"toolFormerStatus":"completed","toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":null}]}"#
+    let resumed = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":{"capabilityType":30}}]}"#
+
+    expect(
+        parser.pendingQuestionCallID(from: Data(waiting.utf8)) == "question-1",
+        "latest Cursor ask-question capability should be pending"
+    )
+    expect(
+        parser.pendingQuestionCallID(from: Data(resumed.utf8)) == nil,
+        "new Cursor reasoning after a question should clear waiting"
+    )
+}
+
+private func writeCursorComposerState(
+    databaseURL: URL,
+    sessionID: String,
+    json: String
+) throws {
+    var database: OpaquePointer?
+    guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    defer { sqlite3_close(database) }
+    let escapedJSON = json.replacingOccurrences(of: "'", with: "''")
+    let statements = """
+    CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT UNIQUE, value BLOB);
+    INSERT OR REPLACE INTO cursorDiskKV (key, value)
+    VALUES ('composerData:\(sessionID)', '\(escapedJSON)');
+    """
+    guard sqlite3_exec(database, statements, nil, nil, nil) == SQLITE_OK else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+}
+
+private func testCursorMonitorMapsQuestionWaitAndResume() {
+    withTemporaryDirectory { root in
+        let window = root.appendingPathComponent("window1", isDirectory: true)
+        try FileManager.default.createDirectory(at: window, withIntermediateDirectories: true)
+        let log = window.appendingPathComponent("Cursor Structured Logs.log")
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-question","requestId":"turn-1""#
+        )
+        try (start + "\n").write(to: log, atomically: true, encoding: .utf8)
+
+        let database = root.appendingPathComponent("state.vscdb")
+        let waiting = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}}]}"#
+        try writeCursorComposerState(
+            databaseURL: database,
+            sessionID: "cursor-question",
+            json: waiting
+        )
+
+        let monitor = CursorLogMonitor(
+            rootURL: root,
+            stateDatabaseURL: database
+        )
+        let waitingEvents = try monitor.poll()
+        expect(
+            waitingEvents.map(\.event) == [
+                .taskStarted(turnID: "turn-1"),
+                .toolStarted(callID: "question-1"),
+            ],
+            "Cursor question should enter the yellow waiting state"
+        )
+
+        let resumed = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":{"capabilityType":30}}]}"#
+        try writeCursorComposerState(
+            databaseURL: database,
+            sessionID: "cursor-question",
+            json: resumed
+        )
+        let resumedEvents = try monitor.poll()
+        expect(
+            resumedEvents.map(\.event) == [.toolFinished(callID: "question-1")],
+            "Cursor should leave yellow waiting after the user continues"
+        )
+    }
+}
+
 testTaskStartsThinkingAndCompletesGreen()
 testToolCallsKeepExecutingUntilEveryResultArrives()
 testErrorHasPriorityOverOtherActiveTasks()
@@ -766,6 +1011,11 @@ testClaudeMonitorMapsRuntimeApprovalToExecuting()
 testClaudeApprovalSuppressesStaleThinkingTimeout()
 testClaudeMonitorResumesInactiveTurnWhenActivityReturns()
 testClaudeRuntimeBusyRestoresInactiveTurn()
+testCursorParserMapsTurnToolAndOutcomes()
+testCursorParserIgnoresUnrelatedStructuredLogs()
+testCursorMonitorTracksExecutionCompletionAndTailing()
+testCursorComposerStateParserFindsPendingQuestion()
+testCursorMonitorMapsQuestionWaitAndResume()
 
 guard failureCount == 0 else {
     fputs("\(failureCount) test assertion(s) failed\n", stderr)

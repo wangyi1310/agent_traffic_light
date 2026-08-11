@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onAcknowledgeClaudeError: { [weak state] in
                 state?.acknowledgeClaudeError()
+            },
+            onAcknowledgeCursorError: { [weak state] in
+                state?.acknowledgeCursorError()
             }
         )
         let statusItem = StatusItemController { [weak panel] in
@@ -22,8 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onStateChanged = { [weak statusItem] trafficLightState in
             statusItem?.update(state: trafficLightState)
         }
-        state.onSourceStatesChanged = { [weak panel] codexState, claudeState in
-            panel?.update(codexState: codexState, claudeState: claudeState)
+        state.onSourceStatesChanged = { [weak panel] codexState, claudeState, cursorState in
+            panel?.update(
+                codexState: codexState,
+                claudeState: claudeState,
+                cursorState: cursorState
+            )
         }
         state.onMonitoringAvailabilityChanged = { [weak statusItem] available in
             statusItem?.updateMonitoringAvailability(available)
