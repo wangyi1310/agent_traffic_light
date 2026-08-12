@@ -16,7 +16,10 @@ let package = Package(
         ),
     ],
     targets: [
-        .target(name: "CodexTrafficLightCore"),
+        .target(
+            name: "CodexTrafficLightCore",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
         .executableTarget(
             name: "CodexTrafficLightApp",
             dependencies: ["CodexTrafficLightCore"]
