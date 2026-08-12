@@ -21,6 +21,7 @@ public final class SessionLogMonitor {
         var incompleteLine = Data()
         var sessionID: String?
         var acceptsEvents = false
+        var turnSessionIDs: [String: String] = [:]
     }
 
     private struct LocatedEvent {
@@ -188,7 +189,38 @@ public final class SessionLogMonitor {
             cursor.sessionID = sessionID
             cursor.acceptsEvents = originator == "Codex Desktop"
         case let .event(timestamp, event):
-            guard cursor.acceptsEvents, let sessionID = cursor.sessionID else { return }
+            let sessionID: String
+            switch event {
+            case let .taskStarted(turnID):
+                guard cursor.acceptsEvents, let currentSessionID = cursor.sessionID else { return }
+                cursor.turnSessionIDs = cursor.turnSessionIDs.filter {
+                    $0.value != currentSessionID
+                }
+                cursor.turnSessionIDs[turnID] = currentSessionID
+                sessionID = currentSessionID
+            case let .taskCompleted(turnID), let .taskAborted(turnID, _):
+                if let originalSessionID = cursor.turnSessionIDs.removeValue(forKey: turnID) {
+                    sessionID = originalSessionID
+                } else {
+                    guard cursor.acceptsEvents, let currentSessionID = cursor.sessionID else {
+                        return
+                    }
+                    sessionID = currentSessionID
+                }
+            case let .taskFailed(turnID):
+                if let turnID,
+                   let originalSessionID = cursor.turnSessionIDs.removeValue(forKey: turnID) {
+                    sessionID = originalSessionID
+                } else {
+                    guard cursor.acceptsEvents, let currentSessionID = cursor.sessionID else {
+                        return
+                    }
+                    sessionID = currentSessionID
+                }
+            case .reasoning, .toolStarted, .toolFinished:
+                guard cursor.acceptsEvents, let currentSessionID = cursor.sessionID else { return }
+                sessionID = currentSessionID
+            }
             events.append(
                 LocatedEvent(
                     path: path,
