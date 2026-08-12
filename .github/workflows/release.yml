@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Select Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - name: Validate tag version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            ''|*[!0-9.]*|.*|*.) exit 1 ;;
+          esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Run unit tests
+        run: swift run CodexTrafficLightCoreTests
+      - name: Package release application
+        run: ./scripts/package_app.sh
+      - name: Create archive
+        run: ditto -c -k --sequesterRsrc --keepParent "build/Codex Traffic Light.app" "Codex-Traffic-Light-${VERSION}-macos.zip"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: Codex-Traffic-Light-${{ env.VERSION }}-macos.zip

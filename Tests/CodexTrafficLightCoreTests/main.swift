@@ -909,18 +909,33 @@ private func testCursorMonitorTracksExecutionCompletionAndTailing() {
     }
 }
 
-private func testCursorComposerStateParserFindsPendingQuestion() {
+private func testCursorComposerStateParserFindsPendingInteractions() {
     let parser = CursorComposerStateParser()
     let waiting = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":30}},{"grouping":{"capabilityType":15,"toolFormerTool":51,"toolFormerStatus":"completed","toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":null}]}"#
     let resumed = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolCallCase":"askQuestionToolCall","toolCallId":"question-1"}},{"grouping":{"capabilityType":30}}]}"#
+    let shellWaiting = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolFormerStatus":"loading","shellStatus":"running","toolCallCase":"shellToolCall","toolCallId":"shell-1"}}]}"#
+    let shellCompleted = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolFormerStatus":"completed","shellStatus":"success","toolCallCase":"shellToolCall","toolCallId":"shell-1"}}]}"#
+    let shellCancelled = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolFormerStatus":"cancelled","shellStatus":"running","toolCallCase":"shellToolCall","toolCallId":"shell-1"}}]}"#
 
     expect(
-        parser.pendingQuestionCallID(from: Data(waiting.utf8)) == "question-1",
+        parser.pendingInteractionCallID(from: Data(waiting.utf8)) == "question-1",
         "latest Cursor ask-question capability should be pending"
     )
     expect(
-        parser.pendingQuestionCallID(from: Data(resumed.utf8)) == nil,
+        parser.pendingInteractionCallID(from: Data(resumed.utf8)) == nil,
         "new Cursor reasoning after a question should clear waiting"
+    )
+    expect(
+        parser.pendingInteractionCallID(from: Data(shellWaiting.utf8)) == "shell-1",
+        "running Cursor shell should include safety approval waits"
+    )
+    expect(
+        parser.pendingInteractionCallID(from: Data(shellCompleted.utf8)) == nil,
+        "completed Cursor shell should not remain pending"
+    )
+    expect(
+        parser.pendingInteractionCallID(from: Data(shellCancelled.utf8)) == nil,
+        "cancelled Cursor shell should not remain pending"
     )
 }
 
@@ -995,6 +1010,58 @@ private func testCursorMonitorMapsQuestionWaitAndResume() {
         expect(
             resumedEvents.map(\.event) == [.toolFinished(callID: "question-1")],
             "Cursor should leave yellow waiting after the user continues"
+        )
+    }
+}
+
+private func testCursorMonitorMapsShellSafetyWaitAndResume() {
+    withTemporaryDirectory { root in
+        let log = root.appendingPathComponent("Cursor Structured Logs.log")
+        let startedAt = Date()
+        let start = cursorLogLine(
+            "Chat submission started",
+            metadata: #""composerId":"cursor-shell","requestId":"turn-1""#,
+            timestamp: cursorTimestamp(startedAt)
+        )
+        try (start + "\n").write(to: log, atomically: true, encoding: .utf8)
+
+        let database = root.appendingPathComponent("state.vscdb")
+        let waiting = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolFormerStatus":"loading","shellStatus":"running","toolCallCase":"shellToolCall","toolCallId":"shell-1"}}]}"#
+        try writeCursorComposerState(
+            databaseURL: database,
+            sessionID: "cursor-shell",
+            json: waiting
+        )
+
+        let monitor = CursorLogMonitor(
+            rootURL: root,
+            stateDatabaseURL: database,
+            inactivityTimeout: 1
+        )
+        let waitingEvents = try monitor.poll(now: startedAt)
+        expect(
+            waitingEvents.map(\.event) == [
+                .taskStarted(turnID: "turn-1"),
+                .toolStarted(callID: "shell-1"),
+            ],
+            "Cursor shell safety approval should enter the yellow waiting state"
+        )
+        let stillWaiting = try monitor.poll(now: startedAt.addingTimeInterval(10))
+        expect(
+            stillWaiting.isEmpty,
+            "pending Cursor shell approval should prevent inactivity expiration"
+        )
+
+        let completed = #"{"fullConversationHeadersOnly":[{"grouping":{"capabilityType":15,"toolFormerStatus":"completed","shellStatus":"success","toolCallCase":"shellToolCall","toolCallId":"shell-1"}}]}"#
+        try writeCursorComposerState(
+            databaseURL: database,
+            sessionID: "cursor-shell",
+            json: completed
+        )
+        let resumedEvents = try monitor.poll(now: startedAt.addingTimeInterval(10))
+        expect(
+            resumedEvents.map(\.event) == [.toolFinished(callID: "shell-1")],
+            "Cursor should leave yellow after shell approval completes"
         )
     }
 }
@@ -1148,8 +1215,9 @@ testClaudeRuntimeBusyRestoresInactiveTurn()
 testCursorParserMapsTurnToolAndOutcomes()
 testCursorParserIgnoresUnrelatedStructuredLogs()
 testCursorMonitorTracksExecutionCompletionAndTailing()
-testCursorComposerStateParserFindsPendingQuestion()
+testCursorComposerStateParserFindsPendingInteractions()
 testCursorMonitorMapsQuestionWaitAndResume()
+testCursorMonitorMapsShellSafetyWaitAndResume()
 testCursorMonitorExpiresTurnWithoutTerminalEvent()
 testCursorMonitorDoesNotExpireOutstandingTool()
 testCursorMonitorExpiresTurnAfterLogLeavesScanRange()

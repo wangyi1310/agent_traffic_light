@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: macos-14
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Select Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - name: Run unit tests
+        run: swift run CodexTrafficLightCoreTests
+      - name: Build application
+        run: swift build -c release --product CodexTrafficLightApp
+      - name: Package application
+        run: ./scripts/package_app.sh
+      - name: Validate bundle metadata
+        run: plutil -lint "build/Codex Traffic Light.app/Contents/Info.plist"
+      - name: Upload application artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-traffic-light-${{ github.sha }}
+          path: build/Codex Traffic Light.app
+          if-no-files-found: error

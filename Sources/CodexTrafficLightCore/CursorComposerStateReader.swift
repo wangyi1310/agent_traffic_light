@@ -4,7 +4,7 @@ import SQLite3
 public struct CursorComposerStateParser: Sendable {
     public init() {}
 
-    public func pendingQuestionCallID(from data: Data) -> String? {
+    public func pendingInteractionCallID(from data: Data) -> String? {
         guard
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let headers = object["fullConversationHeadersOnly"] as? [[String: Any]]
@@ -19,7 +19,15 @@ public struct CursorComposerStateParser: Sendable {
             else {
                 continue
             }
-            guard grouping["toolCallCase"] as? String == "askQuestionToolCall" else {
+            let toolCallCase = grouping["toolCallCase"] as? String
+            if toolCallCase == "askQuestionToolCall" {
+                return grouping["toolCallId"] as? String
+            }
+            guard
+                toolCallCase == "shellToolCall",
+                grouping["toolFormerStatus"] as? String == "loading",
+                grouping["shellStatus"] as? String == "running"
+            else {
                 return nil
             }
             return grouping["toolCallId"] as? String
@@ -36,7 +44,7 @@ struct CursorComposerStateReader {
         self.databaseURL = databaseURL.standardizedFileURL
     }
 
-    func pendingQuestionCallID(sessionID: String) -> String? {
+    func pendingInteractionCallID(sessionID: String) -> String? {
         var database: OpaquePointer?
         guard sqlite3_open_v2(
             databaseURL.path,
@@ -78,7 +86,7 @@ struct CursorComposerStateReader {
             bytes: bytes,
             count: Int(sqlite3_column_bytes(statement, 0))
         )
-        return parser.pendingQuestionCallID(from: data)
+        return parser.pendingInteractionCallID(from: data)
     }
 }
 

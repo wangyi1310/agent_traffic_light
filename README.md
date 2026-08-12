@@ -104,6 +104,28 @@ plutil -lint "build/Codex Traffic Light.app/Contents/Info.plist"
 
 自动化测试使用零依赖的 Swift 可执行测试程序，任一断言失败都会以非零状态退出。
 
+## GitHub 自动化
+
+仓库包含以下 GitHub Actions：
+
+- Pull Request 和主分支推送自动运行单元测试、Release 构建、App 打包和 `Info.plist` 校验。
+- Pull Request 会上传未签名的 `.app` 构建产物，便于下载验证。
+- 创建符合 `vX.Y.Z` 格式的 Tag（例如 `v2.3.4`）后，自动运行测试并创建对应的 GitHub Release，附件为 `Codex-Traffic-Light-2.3.4-macos.zip`。
+- Dependabot 每月检查 GitHub Actions 依赖更新。
+
+Tag 发布示例：
+
+```bash
+git tag v2.3.4
+git push origin v2.3.4
+```
+
+本地打包也支持通过 `VERSION` 和 `BUILD_NUMBER` 覆盖 App 版本信息：
+
+```bash
+VERSION=2.3.4 BUILD_NUMBER=42 ./scripts/package_app.sh
+```
+
 开发验收时可用以下进程环境变量指向匿名临时会话目录：
 
 - `CODEX_TRAFFIC_LIGHT_SESSION_ROOT`

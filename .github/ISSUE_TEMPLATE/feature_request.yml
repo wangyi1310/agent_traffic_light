@@ -1,0 +1,17 @@
+name: Feature request
+description: 提议一个可复用的改进
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: 使用场景
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true

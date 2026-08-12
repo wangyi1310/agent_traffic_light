@@ -28,7 +28,7 @@ public final class CursorLogMonitor {
     private let queue = DispatchQueue(label: "local.codex.traffic-light.cursor-log-monitor")
     private var timer: DispatchSourceTimer?
     private var cursors: [String: FileCursor] = [:]
-    private var activeQuestionCalls: [String: String] = [:]
+    private var activeInteractionCalls: [String: String] = [:]
     private var lastAvailability: Bool?
 
     public init(
@@ -55,7 +55,7 @@ public final class CursorLogMonitor {
         for url in urls.sorted(by: { $0.path < $1.path }) {
             locatedEvents.append(contentsOf: try readNewEvents(from: url, now: now))
         }
-        locatedEvents.append(contentsOf: readQuestionStateEvents(now: now))
+        locatedEvents.append(contentsOf: readInteractionStateEvents(now: now))
         locatedEvents.append(contentsOf: expireInactiveTurns(now: now))
         return locatedEvents.sorted {
             if $0.event.timestamp != $1.event.timestamp {
@@ -68,16 +68,16 @@ public final class CursorLogMonitor {
         }.map(\.event)
     }
 
-    private func readQuestionStateEvents(now: Date) -> [LocatedEvent] {
+    private func readInteractionStateEvents(now: Date) -> [LocatedEvent] {
         guard let stateReader else { return [] }
         let sessions = Set(cursors.values.compactMap(\.currentSessionID))
-            .union(activeQuestionCalls.keys)
+            .union(activeInteractionCalls.keys)
         let timestamp = Self.timestampFormatter.string(from: now)
         var events: [LocatedEvent] = []
 
         for sessionID in sessions.sorted() {
-            let pendingCallID = stateReader.pendingQuestionCallID(sessionID: sessionID)
-            let activeCallID = activeQuestionCalls[sessionID]
+            let pendingCallID = stateReader.pendingInteractionCallID(sessionID: sessionID)
+            let activeCallID = activeInteractionCalls[sessionID]
             if let pendingCallID, pendingCallID != activeCallID {
                 if let activeCallID {
                     append(
@@ -88,7 +88,7 @@ public final class CursorLogMonitor {
                         to: &events
                     )
                 }
-                activeQuestionCalls[sessionID] = pendingCallID
+                activeInteractionCalls[sessionID] = pendingCallID
                 refreshActivity(
                     sessionID: sessionID,
                     now: now,
@@ -102,7 +102,7 @@ public final class CursorLogMonitor {
                     to: &events
                 )
             } else if pendingCallID == nil, let activeCallID {
-                activeQuestionCalls.removeValue(forKey: sessionID)
+                activeInteractionCalls.removeValue(forKey: sessionID)
                 refreshActivity(
                     sessionID: sessionID,
                     now: now,
@@ -156,7 +156,7 @@ public final class CursorLogMonitor {
                 let turnID = cursor.currentTurnID,
                 !cursor.isInactive,
                 cursor.outstandingCalls.isEmpty,
-                activeQuestionCalls[sessionID] == nil,
+                activeInteractionCalls[sessionID] == nil,
                 let lastActivityDate = cursor.lastActivityDate,
                 now.timeIntervalSince(lastActivityDate) >= inactivityTimeout
             else {

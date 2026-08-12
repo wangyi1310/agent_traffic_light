@@ -1,0 +1,30 @@
+name: Bug report
+description: 报告可复现的问题
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请说明实际行为和期望行为。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: macOS 14.5, Apple Silicon, Cursor 版本
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 请勿粘贴提示词、命令正文、会话内容或凭据。
